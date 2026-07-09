@@ -2,20 +2,28 @@
 Tidbyt-Style Baseball Scoreboard plugin for ChuckBuilds/LEDMatrix.
 
 Layout:
-  - Left half: two team columns side by side (not stacked), each full
-    panel height, so each team gets a much bigger logo. Logo on top,
-    "ABBR SCORE" bold text below.
+  - Left half: two team columns side by side, each full panel height.
+    Logo fills nearly the whole column; a darkened bar across the
+    bottom holds the bold "ABBR SCORE" text for contrast.
   - Right half (black background):
-      - upper-left:  inning indicator (solid triangle + inning number)
-      - upper-right: diamond of bases (lit when occupied, configurable colors)
+      - upper-left:  inning indicator (anti-aliased triangle + number)
+      - upper-right: diamond of bases (anti-aliased, configurable colors)
       - lower-left:  ball-strike count
       - lower-right: outs indicator (configurable colors)
 
 By default this cycles through every currently-live MLB game leaguewide
-(not just your favorite teams) every `game_rotation_seconds`. Set
-`show_favorite_teams_only: true` to restrict rotation to your favorite
-teams' live games. If nothing is live, it falls back to showing your
-favorite team's most recent/upcoming game.
+every `game_rotation_seconds`. Set `show_favorite_teams_only: true` to
+restrict rotation to your favorite teams' live games. Falls back to
+your favorite team's most recent/upcoming game if nothing is live.
+
+FONT: rather than hardcoding a guessed filename, this scans
+assets/fonts/ at startup and picks a real font shipped with your
+LEDMatrix install (preferring anything that looks like a pixel/arcade
+font, e.g. Press Start 2P, since that's the style the rest of the
+project's plugins use). Falls back to a system font if that folder
+isn't found. Team abbreviation/score text size is fit dynamically to
+the column width so it can never overflow regardless of which font
+gets picked up.
 
 Data comes from ESPN's public scoreboard API:
     https://site.api.espn.com/apis/site/v2/sports/baseball/mlb/scoreboard
@@ -25,8 +33,6 @@ PIL image slightly differently over time. This plugin builds its own
 RGB PIL.Image internally and then tries, in order:
     1. display_manager.image.paste(...) + display_manager.update_display()
     2. display_manager.set_image(...)
-If neither exists, _push_image() raises a clear error telling you what
-attribute to wire up.
 """
 
 import logging
@@ -41,7 +47,6 @@ from PIL import Image, ImageDraw, ImageFont
 try:
     from src.plugin_system.base_plugin import BasePlugin
 except ImportError:
-    # Fallback for local/dev-preview testing outside the full package tree.
     class BasePlugin:  # type: ignore
         def __init__(self, plugin_id, config, display_manager, cache_manager, plugin_manager):
             self.plugin_id = plugin_id
@@ -57,6 +62,31 @@ ESPN_SCOREBOARD_URL = "https://site.api.espn.com/apis/site/v2/sports/baseball/ml
 DEFAULT_AWAY_COLOR = (0, 142, 226)
 DEFAULT_HOME_COLOR = (200, 16, 46)
 
+# Fonts bundled directly with this plugin (in ./fonts/), pulled from the
+# same assets/fonts/ folder the core LEDMatrix project ships with, so
+# the look matches the rest of your display without depending on
+# discovering files from the main install at runtime.
+#
+# Measured glyph widths at various sizes (see plugin README) show
+# Press Start 2P is quite wide per character -- it doesn't comfortably
+# fit "ABBR SCORE" in a 32px-wide column even at very small sizes
+# without becoming unreadably tiny. 5by7 and 4x6 are much more compact
+# pixel fonts and are the better fit for that particular row; Press
+# Start 2P remains a selectable option since it may suit other layouts
+# or wider panels.
+PLUGIN_DIR = os.path.dirname(os.path.abspath(__file__))
+FONT_CHOICES = {
+    "5by7": os.path.join(PLUGIN_DIR, "fonts", "5by7_regular.ttf"),
+    "4x6": os.path.join(PLUGIN_DIR, "fonts", "4x6-font.ttf"),
+    "press_start_2p": os.path.join(PLUGIN_DIR, "fonts", "PressStart2P-Regular.ttf"),
+    "system": None,
+}
+
+# Preference order for auto-discovering a bundled font from the main
+# LEDMatrix install, used only when font_choice is "system" or the
+# selected bundled file is missing for some reason.
+FONT_NAME_PREFERENCE = ["press", "pixel", "matrix", "arcade", "8x8", "4x6", "retro"]
+
 
 class TidbytBaseballPlugin(BasePlugin):
     def __init__(self, plugin_id, config, display_manager, cache_manager, plugin_manager):
@@ -67,7 +97,6 @@ class TidbytBaseballPlugin(BasePlugin):
         self.session = requests.Session()
         self.session.headers.update({"User-Agent": "LEDMatrix-TidbytBaseball/1.0"})
 
-        # Rotation state
         self.live_games: List[Dict[str, Any]] = []
         self.fallback_game: Optional[Dict[str, Any]] = None
         self.current_index: int = 0
@@ -75,8 +104,15 @@ class TidbytBaseballPlugin(BasePlugin):
         self.last_fetch_time: float = 0.0
 
         self._logo_cache: Dict[str, Optional[Image.Image]] = {}
+        self._font_cache: Dict[Tuple[str, int], ImageFont.FreeTypeFont] = {}
+        self._fit_font_cache: Dict[Tuple[str, int, bool], ImageFont.FreeTypeFont] = {}
 
-        self.font_team = self._load_font(8, bold=True)
+        self._repo_font_path = self._discover_repo_font()
+        if self._repo_font_path:
+            self.logger.info(f"Using bundled font: {self._repo_font_path}")
+        else:
+            self.logger.info("No assets/fonts directory found; using system fonts as fallback.")
+
         self.font_small = self._load_font(9)
         self.font_tiny = self._load_font(7)
 
@@ -100,12 +136,22 @@ class TidbytBaseballPlugin(BasePlugin):
         self.base_empty_color = tuple(cfg.get("base_empty_color", [95, 95, 95]))
         self.out_fill_color = tuple(cfg.get("out_fill_color", [255, 140, 0]))
         self.out_empty_color = tuple(cfg.get("out_empty_color", [120, 120, 120]))
+        self.font_choice = cfg.get("font_choice", "5by7")
+        self.show_batter_name = cfg.get("show_batter_name", True)
         self.test_mode = cfg.get("test_mode", False)
 
     def on_config_change(self, new_config):
         self.config = new_config
+        old_font_choice = getattr(self, "font_choice", None)
         self._derive_settings()
         self.last_fetch_time = 0
+        if self.font_choice != old_font_choice:
+            # Selected font changed -- clear caches so _load_font picks
+            # up the new one instead of returning a stale cached object.
+            self._font_cache.clear()
+            self._fit_font_cache.clear()
+            self.font_small = self._load_font(9)
+            self.font_tiny = self._load_font(7)
 
     def validate_config(self) -> bool:
         if not self.favorite_teams:
@@ -113,27 +159,120 @@ class TidbytBaseballPlugin(BasePlugin):
             return False
         return True
 
+    # ------------------------------------------------------------------
+    # Fonts
+    # ------------------------------------------------------------------
+    def _discover_repo_font(self) -> Optional[str]:
+        """Scans assets/fonts/ (relative to the LEDMatrix install root)
+        for a real bundled font instead of guessing a filename. Prefers
+        anything that looks like a pixel/arcade font so team text
+        matches the aesthetic the rest of the project's plugins use."""
+        fonts_dir = "assets/fonts"
+        if not os.path.isdir(fonts_dir):
+            return None
+        try:
+            files = [f for f in os.listdir(fonts_dir) if f.lower().endswith((".ttf", ".otf"))]
+        except Exception as e:
+            self.logger.warning(f"Could not list {fonts_dir}: {e}")
+            return None
+        if not files:
+            return None
+
+        for keyword in FONT_NAME_PREFERENCE:
+            for f in files:
+                if keyword in f.lower():
+                    return os.path.join(fonts_dir, f)
+        return os.path.join(fonts_dir, sorted(files)[0])
+
     def _load_font(self, size: int, bold: bool = False) -> ImageFont.FreeTypeFont:
-        candidates = [
-            "assets/fonts/PressStart2P.ttf",
-            "assets/fonts/4x6-font.ttf",
-            "assets/fonts/PressStart2P-Regular.ttf",
-        ]
+        cache_key = (self.font_choice, size)
+        if cache_key in self._font_cache:
+            return self._font_cache[cache_key]
+
+        candidates = []
+
+        bundled_path = FONT_CHOICES.get(self.font_choice)
+        if bundled_path and os.path.isfile(bundled_path):
+            candidates.append(bundled_path)
+        elif self.font_choice != "system":
+            self.logger.warning(
+                f"font_choice '{self.font_choice}' bundled file not found at "
+                f"expected path; falling back to auto-discovery / system font."
+            )
+
+        if self._repo_font_path:
+            candidates.append(self._repo_font_path)
+
         if bold:
             candidates += [
                 "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf",
                 "/usr/share/fonts/truetype/liberation/LiberationMono-Bold.ttf",
             ]
         else:
-            candidates += [
-                "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
-            ]
+            candidates.append("/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf")
+
+        font = None
         for path in candidates:
             try:
-                return ImageFont.truetype(path, size)
+                font = ImageFont.truetype(path, size)
+                break
             except Exception:
                 continue
-        return ImageFont.load_default()
+        if font is None:
+            font = ImageFont.load_default()
+
+        self._font_cache[cache_key] = font
+        return font
+
+    def _fit_font_for_width(self, draw, text: str, max_width: int, start_size: int, min_size: int = 4) -> ImageFont.FreeTypeFont:
+        """Shrinks the font size until `text` fits within max_width.
+        Works regardless of which font got auto-discovered, since
+        different fonts have very different glyph widths (this is what
+        caused double-digit scores to overflow before)."""
+        cache_key = (self.font_choice, text, max_width)
+        if cache_key in self._fit_font_cache:
+            return self._fit_font_cache[cache_key]
+
+        size = start_size
+        chosen = None
+        while size >= min_size:
+            font = self._load_font(size, bold=True)
+            bbox = draw.textbbox((0, 0), text, font=font)
+            if bbox[2] - bbox[0] <= max_width:
+                chosen = font
+                break
+            size -= 1
+        if chosen is None:
+            chosen = self._load_font(min_size, bold=True)
+
+        self._fit_font_cache[cache_key] = chosen
+        return chosen
+
+    def _fit_font_for_pair(self, draw, text_a: str, text_b: str, max_width: int, start_size: int, min_size: int = 4) -> ImageFont.FreeTypeFont:
+        """Like _fit_font_for_width, but sizes for whichever of the two
+        strings is wider, so both team columns render at the SAME font
+        size rather than each shrinking independently based on its own
+        text length (that mismatch was the original bug)."""
+        cache_key = (self.font_choice, text_a, text_b, max_width)
+        if cache_key in self._fit_font_cache:
+            return self._fit_font_cache[cache_key]
+
+        size = start_size
+        chosen = None
+        while size >= min_size:
+            font = self._load_font(size, bold=True)
+            bbox_a = draw.textbbox((0, 0), text_a, font=font)
+            bbox_b = draw.textbbox((0, 0), text_b, font=font)
+            widest = max(bbox_a[2] - bbox_a[0], bbox_b[2] - bbox_b[0])
+            if widest <= max_width:
+                chosen = font
+                break
+            size -= 1
+        if chosen is None:
+            chosen = self._load_font(min_size, bold=True)
+
+        self._fit_font_cache[cache_key] = chosen
+        return chosen
 
     # ------------------------------------------------------------------
     # Data fetching
@@ -178,11 +317,6 @@ class TidbytBaseballPlugin(BasePlugin):
             self.current_index = 0
 
     def _process_scoreboard(self, data: Dict[str, Any]):
-        """Returns (live_games, fallback_game). live_games is every
-        currently in-progress game leaguewide (or just favorite teams'
-        if show_favorite_teams_only is set). fallback_game is your
-        favorite team's most relevant scheduled/recent game, used only
-        when nothing is live."""
         events = data.get("events", [])
         live_games = []
 
@@ -219,10 +353,8 @@ class TidbytBaseballPlugin(BasePlugin):
             abbrevs = [c.get("team", {}).get("abbreviation", "").upper() for c in competitors]
             if any(fav in abbrevs for fav in self.favorite_teams):
                 candidates.append((event, comp))
-
         if not candidates:
             return None
-
         event, comp = candidates[0]
         return self._parse_game(event, comp)
 
@@ -253,6 +385,31 @@ class TidbytBaseballPlugin(BasePlugin):
                 return logos[0].get("href")
             return None
 
+        def extract_batter_name(situation_dict):
+            """ESPN's scoreboard payload isn't officially documented, so
+            this tries several plausible shapes for the current batter's
+            name rather than assuming one exact path. Returns None (not
+            a crash) if nothing matches -- the display just omits the
+            batter line in that case. If the actual shape turns out to
+            be something else entirely, check plugin logs for the raw
+            situation keys logged the first time this comes up empty
+            during a live game, and I can add the right path."""
+            candidates = [
+                lambda s: s.get("batter", {}).get("athlete", {}).get("displayName"),
+                lambda s: s.get("batter", {}).get("athlete", {}).get("fullName"),
+                lambda s: s.get("batter", {}).get("displayName"),
+                lambda s: s.get("atBat", {}).get("athlete", {}).get("displayName"),
+                lambda s: s.get("atBat", {}).get("displayName"),
+            ]
+            for getter in candidates:
+                try:
+                    name = getter(situation_dict)
+                    if name:
+                        return name
+                except Exception:
+                    continue
+            return None
+
         return {
             "state": status_type.get("state", "pre"),
             "away_abbr": away.get("team", {}).get("abbreviation", "AWY")[:3].upper(),
@@ -270,6 +427,7 @@ class TidbytBaseballPlugin(BasePlugin):
             "balls": situation.get("balls", 0),
             "strikes": situation.get("strikes", 0),
             "outs": situation.get("outs", 0),
+            "batter_name": extract_batter_name(situation),
             "on_first": bool(situation.get("onFirst")),
             "on_second": bool(situation.get("onSecond")),
             "on_third": bool(situation.get("onThird")),
@@ -293,6 +451,7 @@ class TidbytBaseballPlugin(BasePlugin):
             "balls": 2,
             "strikes": 1,
             "outs": 1,
+            "batter_name": "Riley Greene",
             "on_first": True,
             "on_second": False,
             "on_third": True,
@@ -321,8 +480,9 @@ class TidbytBaseballPlugin(BasePlugin):
         if not self.show_logos:
             return
         if size is None:
-            _, height = self._get_dimensions()
-            size = max(height - 12, 10)  # leave room for the text row below
+            width, height = self._get_dimensions()
+            col_w = (width // 2) // 2
+            size = max(min(col_w, height) - 2, 12)
         game["away_logo"] = self._get_team_logo(game["away_abbr"], game.get("away_logo_url"), size)
         game["home_logo"] = self._get_team_logo(game["home_abbr"], game.get("home_logo_url"), size)
 
@@ -381,34 +541,51 @@ class TidbytBaseballPlugin(BasePlugin):
         left_w = width // 2
         col_w = left_w // 2
 
-        # --- Left half: two team columns side by side, full height ---
         draw.rectangle([0, 0, col_w - 1, height - 1], fill=game["away_color"])
         draw.rectangle([col_w, 0, left_w - 1, height - 1], fill=game["home_color"])
 
         away_txt_color = self._text_color_for(game["away_color"])
         home_txt_color = self._text_color_for(game["home_color"])
 
-        self._draw_team_column(image, draw, 0, 0, col_w, height,
-                                game["away_abbr"], game["away_score"], game.get("away_logo"), away_txt_color)
-        self._draw_team_column(image, draw, col_w, 0, left_w - col_w, height,
-                                game["home_abbr"], game["home_score"], game.get("home_logo"), home_txt_color)
+        # Both columns must render at the SAME font size, or a team with
+        # a longer score (e.g. "DET 12" vs "ATH 2") would shrink more to
+        # fit and visibly look smaller than the other -- that's the bug
+        # that made one team's text look bigger than the other's.
+        away_text = f"{game['away_abbr']} {game['away_score']}"
+        home_text = f"{game['home_abbr']} {game['home_score']}"
+        available_text_width = col_w - 4
+        shared_font = self._fit_font_for_pair(draw, away_text, home_text, available_text_width, start_size=10)
 
-        # --- Right half (black): inning upper-left, diamond centered,
-        #     count lower-left, outs lower-right ---
+        self._draw_team_column(image, draw, 0, 0, col_w, height,
+                                game["away_abbr"], game["away_score"], game.get("away_logo"),
+                                away_txt_color, game["away_color"], shared_font)
+        self._draw_team_column(image, draw, col_w, 0, left_w - col_w, height,
+                                game["home_abbr"], game["home_score"], game.get("home_logo"),
+                                home_txt_color, game["home_color"], shared_font)
+
         right_x0 = left_w + 2
         right_w = width - right_x0 - 1
 
-        self._draw_inning(draw, right_x0 + 1, 1, game)
+        self._draw_inning(image, right_x0 + 1, 1, game)
+        self._draw_outs(draw, right_x0, 1, right_w, game)
 
+        top_row_bottom = 7  # matches the now-smaller inning triangle's actual extent
+        lower_y = height - 6  # bottom-row text measures ~5px tall, so this is measured, not padded
+        diamond_y = top_row_bottom  # shifted up 1px from before to make room for a bigger diamond
+        diamond_available_h = (lower_y - 2) - diamond_y  # leave a clear gap before the bottom row
         diamond_w = int(right_w * 0.5)
-        diamond_h = int(height * 0.62)
         diamond_x = right_x0 + (right_w - diamond_w) // 2
-        diamond_y = (height - diamond_h) // 2 - 2
-        self._draw_diamond(draw, diamond_x, diamond_y, diamond_w, diamond_h, game, scale=0.78)
+        self._draw_diamond(image, diamond_x, diamond_y, diamond_w, diamond_available_h, game)
 
-        lower_y = height - 8
+        count_text = f"{game['balls']}-{game['strikes']}"
         self._draw_count(draw, right_x0 + 1, lower_y, game)
-        self._draw_outs(draw, right_x0, lower_y, right_w, game)
+
+        if self.show_batter_name:
+            count_bbox = draw.textbbox((0, 0), count_text, font=self.font_tiny)
+            count_w = count_bbox[2] - count_bbox[0]
+            batter_x = right_x0 + 1 + count_w + 4
+            batter_max_w = (right_x0 + right_w) - batter_x
+            self._draw_batter(draw, batter_x, lower_y, batter_max_w, game.get("batter_name"))
 
         self._push_image(image, force_clear)
 
@@ -447,41 +624,91 @@ class TidbytBaseballPlugin(BasePlugin):
         luminance = 0.299 * bg[0] + 0.587 * bg[1] + 0.114 * bg[2]
         return (0, 0, 0) if luminance > 150 else (255, 255, 255)
 
+    @staticmethod
+    def _format_batter_name(full_name: Optional[str]) -> Optional[str]:
+        """"Riley Greene" -> "R. Greene". Anything with a suffix like
+        "Jazz Chisholm Jr." becomes "J. Chisholm Jr." -- reasonable
+        enough for a tiny scoreboard row."""
+        if not full_name:
+            return None
+        parts = full_name.strip().split()
+        if len(parts) < 2:
+            return full_name
+        return f"{parts[0][0]}. {' '.join(parts[1:])}"
+
     def _draw_bold_text(self, draw, xy, text, font, fill):
-        """Faux-bold: draws the text at a couple of 1px offsets to
-        thicken the strokes. More reliable than depending on a bold TTF
-        file actually being present/embedded at runtime."""
         x, y = xy
         for dx, dy in ((0, 0), (1, 0), (0, 1)):
             draw.text((x + dx, y + dy), text, font=font, fill=fill)
 
-    def _draw_team_column(self, image, draw, x0, y0, w, h, abbr, score, logo, text_color):
-        """Logo on top (as large as the column allows), bold
-        'ABBR SCORE' text on a single line underneath."""
+    # ---- anti-aliasing helper -----------------------------------------
+    def _draw_smooth_polygon(self, image, points, fill=None, outline=None, width=1, supersample=4, padding=2):
+        """Draws a polygon anti-aliased by rendering it at `supersample`x
+        resolution on a transparent layer and downsampling with LANCZOS,
+        then alpha-composites it onto `image`. This is what fixes jagged
+        diagonal edges on triangles/diamonds -- real RGB LED panels can
+        display partial brightness, so smoothed edges genuinely look
+        better rather than just being a software-only nicety."""
+        xs = [p[0] for p in points]
+        ys = [p[1] for p in points]
+        min_x, max_x = min(xs) - padding, max(xs) + padding
+        min_y, max_y = min(ys) - padding, max(ys) + padding
+        w = max(int(round(max_x - min_x)), 1)
+        h = max(int(round(max_y - min_y)), 1)
+
+        temp = Image.new("RGBA", (w * supersample, h * supersample), (0, 0, 0, 0))
+        td = ImageDraw.Draw(temp)
+        scaled_pts = [((x - min_x) * supersample, (y - min_y) * supersample) for x, y in points]
+
+        if fill is not None:
+            fill_rgba = fill if len(fill) == 4 else tuple(fill) + (255,)
+            td.polygon(scaled_pts, fill=fill_rgba)
+        if outline is not None:
+            outline_rgba = outline if len(outline) == 4 else tuple(outline) + (255,)
+            td.polygon(scaled_pts, outline=outline_rgba, width=max(width * supersample, 1))
+
+        small = temp.resize((w, h), Image.LANCZOS)
+        image.paste(small, (int(round(min_x)), int(round(min_y))), small)
+
+    def _draw_team_column(self, image, draw, x0, y0, w, h, abbr, score, logo, text_color, bg_color, font):
+        """Logo fills nearly the whole column (as large as the panel
+        allows); a darkened bar across the bottom holds the bold
+        'ABBR SCORE' text so it stays legible over the logo. `font` is
+        computed once by the caller from BOTH columns' text, so the two
+        teams always render at the same size."""
         text_line = f"{abbr} {score}"
-        line_bbox = draw.textbbox((0, 0), text_line, font=self.font_team)
+        line_bbox = draw.textbbox((0, 0), text_line, font=font)
         line_h = line_bbox[3] - line_bbox[1]
         line_w = line_bbox[2] - line_bbox[0]
-
-        logo_area_h = h - line_h - 4
+        bar_h = line_h + 4
 
         if logo is not None:
-            logo_x = x0 + (w - logo.width) // 2
-            logo_y = y0 + max((logo_area_h - logo.height) // 2, 0) + 1
+            logo_x = x0 + max((w - logo.width) // 2, 0)
+            logo_y = y0 + max((h - logo.height) // 2, 0)
             image.paste(logo, (logo_x, logo_y), logo)
+
+        bar_y0 = y0 + h - bar_h
+        bar_color = tuple(max(c // 2, 15) for c in bg_color)
+        draw.rectangle([x0, bar_y0, x0 + w - 1, y0 + h - 1], fill=bar_color)
 
         tx = x0 + max((w - line_w) // 2, 0)
         tx = min(tx, x0 + w - line_w) if line_w < w else x0
-        ty = y0 + h - line_h - 2 - line_bbox[1]
-        self._draw_bold_text(draw, (tx, ty), text_line, self.font_team, text_color)
+        ty = bar_y0 + max((bar_h - line_h) // 2, 0) - line_bbox[1]
+        self._draw_bold_text(draw, (tx, ty), text_line, font, text_color)
 
-    def _draw_diamond(self, draw, x, y, w, h, game, scale=0.78):
-        """Draws 3 diamonds (2nd top-center, 3rd/1st below on either side)
-        lit up in base_fill_color when occupied, outlined in
-        base_empty_color when empty."""
+    def _draw_diamond(self, image, x, y, w, h, game):
+        """`h` is the actual vertical space available for the whole
+        diamond shape (from the caller's layout, not a scale factor) --
+        `half` is derived so the diamond's total vertical span (3*half+2)
+        and horizontal span (2*half+6) both fit inside h/w. This is
+        what guarantees the diamond can never overlap the row above or
+        below it even as the rest of the layout changes; a fixed scale
+        factor doesn't know how much room neighboring rows are actually
+        using."""
         cx = x + w // 2
-        size = int(min(w // 2, h) * scale)
-        half = max(size // 2, 3)
+        max_half_by_height = max((h - 2) // 3, 3)
+        max_half_by_width = max((w - 6) // 2, 3)
+        half = max(min(max_half_by_height, max_half_by_width), 3)
 
         top_y = y + half + 1
         bottom_y = top_y + half + 2
@@ -505,26 +732,47 @@ class TidbytBaseballPlugin(BasePlugin):
                 (px - half, py),
             ]
             if occupied[base]:
-                draw.polygon(pts, fill=self.base_fill_color)
+                self._draw_smooth_polygon(image, pts, fill=self.base_fill_color)
             else:
-                draw.polygon(pts, outline=self.base_empty_color)
+                self._draw_smooth_polygon(image, pts, outline=self.base_empty_color, width=1)
 
-    def _draw_inning(self, draw, x, y, game):
-        """Solid triangle pointing up (top of inning) or down (bottom),
-        drawn as a polygon rather than a unicode arrow glyph -- unicode
-        arrows (▲▼) render as a blank/empty box (tofu) on many bitmap
-        or embedded fonts, which is why this showed up broken before."""
-        tri_size = 7
+    def _draw_inning(self, image, x, y, game):
+        """Anti-aliased solid triangle -- point up for top of inning,
+        point down for bottom -- plus the inning number, vertically
+        centered on the triangle using its actual measured glyph height
+        rather than a guessed offset."""
+        tri_size = 6
         if game["inning_half"]:
-            pts = [(x, y + tri_size), (x + tri_size // 2, y), (x + tri_size, y + tri_size)]
+            pts = [(x, y + tri_size), (x + tri_size / 2, y), (x + tri_size, y + tri_size)]
         else:
-            pts = [(x, y), (x + tri_size, y), (x + tri_size // 2, y + tri_size)]
-        draw.polygon(pts, fill=(255, 255, 255))
-        draw.text((x + tri_size + 2, y - 1), str(game["inning"]), font=self.font_small, fill=(255, 255, 255))
+            pts = [(x, y), (x + tri_size, y), (x + tri_size / 2, y + tri_size)]
+        self._draw_smooth_polygon(image, pts, fill=(255, 255, 255))
+
+        draw = ImageDraw.Draw(image)
+        number_text = str(game["inning"])
+        bbox = draw.textbbox((0, 0), number_text, font=self.font_tiny)
+        glyph_h = bbox[3] - bbox[1]
+        text_y = y + (tri_size - glyph_h) // 2 - bbox[1]
+        draw.text((x + tri_size + 2, text_y), number_text, font=self.font_tiny, fill=(255, 255, 255))
 
     def _draw_count(self, draw, x, y, game):
         count_text = f"{game['balls']}-{game['strikes']}"
         draw.text((x, y), count_text, font=self.font_tiny, fill=(255, 200, 0))
+
+    def _draw_batter(self, draw, x, y, max_width, batter_name):
+        """Draws 'F. Lastname' for whoever is currently at bat, shrunk
+        to fit whatever width remains next to the count. Skips silently
+        (no placeholder text) if ESPN didn't provide a batter name --
+        see the comment in _parse_game.extract_batter_name for how to
+        fix that if it turns out ESPN's field is named something else."""
+        if not batter_name or max_width <= 0:
+            return
+        formatted = self._format_batter_name(batter_name)
+        font = self._fit_font_for_width(draw, formatted, max_width, start_size=7, min_size=4)
+        bbox = draw.textbbox((0, 0), formatted, font=font)
+        if bbox[2] - bbox[0] > max_width:
+            return  # still doesn't fit even at the smallest size -- skip rather than overflow
+        draw.text((x, y), formatted, font=font, fill=(200, 200, 200))
 
     def _draw_outs(self, draw, x, y, w, game):
         square = 3

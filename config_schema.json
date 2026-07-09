@@ -10,8 +10,12 @@
     },
     "favorite_teams": {
       "type": "array",
-      "items": { "type": "string" },
-      "default": ["PHI"],
+      "items": {
+        "type": "string"
+      },
+      "default": [
+        "PHI"
+      ],
       "description": "ESPN team abbreviations, used as the fallback game (scheduled/recent) when nothing is live, and as the rotation filter if show_favorite_teams_only is true"
     },
     "show_favorite_teams_only": {
@@ -44,14 +48,26 @@
     },
     "away_color": {
       "type": "array",
-      "items": { "type": "integer" },
-      "default": [0, 142, 226],
+      "items": {
+        "type": "integer"
+      },
+      "default": [
+        0,
+        142,
+        226
+      ],
       "description": "RGB fallback color for the away team column"
     },
     "home_color": {
       "type": "array",
-      "items": { "type": "integer" },
-      "default": [200, 16, 46],
+      "items": {
+        "type": "integer"
+      },
+      "default": [
+        200,
+        16,
+        46
+      ],
       "description": "RGB fallback color for the home team column"
     },
     "use_team_colors": {
@@ -71,33 +87,76 @@
     },
     "base_fill_color": {
       "type": "array",
-      "items": { "type": "integer" },
-      "default": [255, 255, 255],
+      "items": {
+        "type": "integer"
+      },
+      "default": [
+        255,
+        255,
+        255
+      ],
       "description": "RGB color for an occupied base on the diamond indicator"
     },
     "base_empty_color": {
       "type": "array",
-      "items": { "type": "integer" },
-      "default": [95, 95, 95],
+      "items": {
+        "type": "integer"
+      },
+      "default": [
+        95,
+        95,
+        95
+      ],
       "description": "RGB color for an empty base outline on the diamond indicator"
     },
     "out_fill_color": {
       "type": "array",
-      "items": { "type": "integer" },
-      "default": [255, 140, 0],
+      "items": {
+        "type": "integer"
+      },
+      "default": [
+        255,
+        140,
+        0
+      ],
       "description": "RGB color for a recorded out square"
     },
     "out_empty_color": {
       "type": "array",
-      "items": { "type": "integer" },
-      "default": [120, 120, 120],
+      "items": {
+        "type": "integer"
+      },
+      "default": [
+        120,
+        120,
+        120
+      ],
       "description": "RGB color for a not-yet-recorded out square outline"
     },
     "test_mode": {
       "type": "boolean",
       "default": false,
       "description": "Render a fake in-progress game instead of calling ESPN (for layout testing)"
+    },
+    "font_choice": {
+      "type": "string",
+      "enum": [
+        "5by7",
+        "4x6",
+        "press_start_2p",
+        "system"
+      ],
+      "default": "5by7",
+      "description": "Pixel font for team abbreviation/score text, bundled directly with this plugin (pulled from the same assets/fonts/ folder LEDMatrix ships with). 5by7 and 4x6 are compact and fit this layout well; press_start_2p is wider per-character and renders very small in this column; system falls back to a generic bold monospace font."
+    },
+    "show_batter_name": {
+      "type": "boolean",
+      "default": true,
+      "description": "Show the current batter (first initial + last name) at the bottom-right of the black half, next to the ball-strike count. Depends on ESPN actually providing batter data in the scoreboard response -- silently omitted if not available."
     }
   },
-  "required": ["enabled", "favorite_teams"]
+  "required": [
+    "enabled",
+    "favorite_teams"
+  ]
 }

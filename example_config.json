@@ -16,6 +16,8 @@
     "base_empty_color": [95, 95, 95],
     "out_fill_color": [255, 140, 0],
     "out_empty_color": [120, 120, 120],
+    "font_choice": "5by7",
+    "show_batter_name": true,
     "test_mode": false
   }
 }
