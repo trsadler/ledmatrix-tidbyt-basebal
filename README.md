@@ -209,6 +209,64 @@ rather than failing silently into the generic fallback.
   layout numbers working out that way -- not a deliberate bump, just
   where the math landed.
 
+## Critical fix: oversized/overflowing team text
+
+**This was a real bug I introduced with the BDF support, not a tuning
+issue.** `_fit_font_for_width`/`_fit_font_for_pair` were checking
+`if self.font_choice in BDF_FONT_CHOICES` to decide whether to skip
+the shrink-to-fit loop (since BDF is a fixed size and doesn't need
+shrinking). But that check trusted the *config string*, not whether a
+BDF font actually loaded. If `tom-thumb.bdf` failed to parse for any
+reason, `_load_font()` silently falls back to a TTF font -- and the
+shrink-loop-skip logic would still fire (because `font_choice` was
+still `"tom_thumb"`), returning that TTF font at a fixed `start_size`
+(10) with **zero shrinking ever applied**. That's exactly the "team
+abbreviations far too big" symptom -- confirmed by deliberately
+breaking BDF loading in a test and reproducing oversized, unshrunk
+text, then re-running the same test after the fix and confirming text
+stays compact (verified numerically: text height dropped from
+overflowing most of the panel to a normal ~7px band).
+
+**Fixed**: the skip-shrinking decision now checks
+`isinstance(loaded_font, BDFFont)` -- the actual resolved object --
+rather than trusting the config string. If BDF fails and falls back to
+a TTF, that TTF now correctly goes through the normal shrink loop.
+
+**Also hardened**: `_load_font()` now tries every *other* bundled TTF
+this plugin ships with (5by7, 4x6, press_start_2p) before falling back
+to OS-level system fonts, since a minimal Raspberry Pi OS install may
+not have DejaVu/Liberation fonts at all. And startup now logs the
+actual contents of the plugin's `fonts/` directory plus the concrete
+resolved font type, so you can confirm from logs alone -- no SSH
+needed -- whether BDF loaded correctly:
+```
+INFO: Plugin fonts/ directory (.../fonts) actually contains: ['PressStart2P-Regular.ttf', '5by7_regular.ttf', '4x6-font.ttf', 'tom-thumb.bdf']
+INFO: font_choice 'tom_thumb' -> bundled file found OK at .../fonts/tom-thumb.bdf
+INFO: font_choice 'tom_thumb' resolved to: BDFFont (correct)
+```
+If that last line instead says "resolved to a TrueType font" with a
+WARNING, or "resolved to <class ...ImageFont.ImageFont>" (PIL's crude
+default), that tells us definitively what's failing on your install --
+please share that log output if things still look off.
+
+**Inning-number centering**: I re-verified the centering math (from
+the previous fix) against both a working BDF font AND a simulated TTF
+fallback, and it measures an exact 0px difference between the
+triangle's center and the number's center in both cases. My read is
+that the "not centered" appearance in your screenshot was a symptom of
+the oversized-font bug above (a much bigger number just looks
+disproportionate next to a tiny triangle, even if technically
+centered) rather than a separate centering bug. Should resolve once
+you update.
+
+**The stray "0" artifact I can't yet explain.** It's very likely
+connected to the same font-loading cascade (an oversized or
+mismeasured glyph from some other element bleeding into that area),
+but I can't pin down the exact mechanism without seeing your actual
+logs. Please check them after this update -- if it persists, the
+specific log lines above (especially the "resolved to" line) will help
+me find it fast rather than guessing again.
+
 ## Logo size and inning-number centering (latest tweaks)
 
 - **Logos are bigger** and now allowed to bleed off the panel/column

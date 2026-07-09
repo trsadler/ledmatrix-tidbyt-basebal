@@ -224,6 +224,13 @@ class TidbytBaseballPlugin(BasePlugin):
         # happens to fail into the fallback -- this makes it immediately
         # visible in the logs whether the plugin's own fonts/ folder
         # actually made it into the install correctly.
+        fonts_dir = os.path.join(PLUGIN_DIR, "fonts")
+        try:
+            actual_files = os.listdir(fonts_dir) if os.path.isdir(fonts_dir) else None
+        except Exception as e:
+            actual_files = f"<could not list: {e}>"
+        self.logger.info(f"Plugin fonts/ directory ({fonts_dir}) actually contains: {actual_files}")
+
         expected_bundled_path = FONT_CHOICES.get(self.font_choice)
         if expected_bundled_path and os.path.isfile(expected_bundled_path):
             self.logger.info(f"font_choice '{self.font_choice}' -> bundled file found OK at {expected_bundled_path}")
@@ -231,10 +238,11 @@ class TidbytBaseballPlugin(BasePlugin):
             self.logger.error(
                 f"font_choice '{self.font_choice}' -> bundled file NOT FOUND at "
                 f"{expected_bundled_path}. This means the plugin's fonts/ folder "
-                f"didn't make it into your install correctly (check that "
-                f"{os.path.join(PLUGIN_DIR, 'fonts')} actually contains the .ttf files). "
-                f"Text will fall back to auto-discovery or, worst case, PIL's crude "
-                f"default bitmap font -- which is almost certainly why things look wrong."
+                f"didn't make it into your install correctly (see the directory "
+                f"listing logged just above -- if it's missing entirely or empty, "
+                f"that confirms it). Text will fall back to auto-discovery, other "
+                f"bundled fonts, system fonts, or worst case PIL's crude default "
+                f"bitmap font."
             )
 
         if self._repo_font_path:
@@ -243,6 +251,27 @@ class TidbytBaseballPlugin(BasePlugin):
         self.font_small = self._load_font(9)
         self.font_tiny = self._load_font(7)
         self.font_count = self._load_font(6)
+
+        # Log the ACTUAL resolved font type/size for the font_choice
+        # selected -- this is the most direct way to confirm from logs
+        # alone whether BDF loaded correctly, fell back to a TTF, or
+        # fell all the way back to PIL's default bitmap font.
+        resolved = self._load_font(9, bold=True)
+        if isinstance(resolved, BDFFont):
+            self.logger.info(f"font_choice '{self.font_choice}' resolved to: BDFFont (correct)")
+        elif isinstance(resolved, ImageFont.FreeTypeFont):
+            self.logger.info(
+                f"font_choice '{self.font_choice}' resolved to a TrueType font "
+                f"(path={getattr(resolved, 'path', '?')}, size={getattr(resolved, 'size', '?')}). "
+                f"{'This is expected if you picked a TTF font_choice.' if self.font_choice not in BDF_FONT_CHOICES else 'WARNING: you picked tom_thumb but got a TTF font back -- BDF parsing failed, see errors above.'}"
+            )
+        else:
+            self.logger.error(
+                f"font_choice '{self.font_choice}' resolved to {type(resolved)} -- "
+                f"this is almost certainly PIL's crude default bitmap font, meaning "
+                f"EVERY candidate failed to load. Text will look wrong and ignore "
+                f"requested sizes. Check all the errors logged above for why."
+            )
 
     # ------------------------------------------------------------------
     # Config handling
@@ -352,6 +381,18 @@ class TidbytBaseballPlugin(BasePlugin):
         if self._repo_font_path:
             candidates.append(self._repo_font_path)
 
+        # Try every OTHER bundled TTF this plugin ships with before
+        # falling back to system fonts -- these are guaranteed to be
+        # sitting right next to manager.py (assuming the plugin's own
+        # fonts/ folder made it into the install at all), so they're
+        # more likely to actually be there than OS-level font packages,
+        # which a minimal Raspberry Pi OS Lite install may not include.
+        for choice, path in FONT_CHOICES.items():
+            if choice in BDF_FONT_CHOICES or choice == self.font_choice or path is None:
+                continue
+            if os.path.isfile(path):
+                candidates.append(path)
+
         if bold:
             candidates += [
                 "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf",
@@ -408,12 +449,20 @@ class TidbytBaseballPlugin(BasePlugin):
         """Shrinks the font size until `text` fits within max_width.
         Works regardless of which font got auto-discovered, since
         different fonts have very different glyph widths (this is what
-        caused double-digit scores to overflow before). BDF fonts are a
-        fixed size, so this just returns the BDF font directly without
-        attempting to shrink it -- they're compact enough by design to
-        not need it (see plugin README)."""
-        if self.font_choice in BDF_FONT_CHOICES:
-            return self._load_font(start_size, bold=True)
+        caused double-digit scores to overflow before).
+
+        BDF fonts are a fixed size, so this skips shrinking for them --
+        but only after confirming _load_font() actually returned a
+        BDFFont. If font_choice is "tom_thumb" but the BDF file failed
+        to parse for some reason, _load_font() silently falls back to a
+        full-size TTF font -- and skipping the shrink loop in that case
+        would render that TTF at `start_size` with ZERO shrinking,
+        which is exactly what caused oversized, overflowing text. Only
+        the confirmed-BDF case skips the loop; any fallback still goes
+        through normal shrink-to-fit."""
+        candidate = self._load_font(start_size, bold=True)
+        if isinstance(candidate, BDFFont):
+            return candidate
 
         cache_key = (self.font_choice, text, max_width)
         if cache_key in self._fit_font_cache:
@@ -438,9 +487,12 @@ class TidbytBaseballPlugin(BasePlugin):
         """Like _fit_font_for_width, but sizes for whichever of the two
         strings is wider, so both team columns render at the SAME font
         size rather than each shrinking independently based on its own
-        text length (that mismatch was the original bug)."""
-        if self.font_choice in BDF_FONT_CHOICES:
-            return self._load_font(start_size, bold=True)
+        text length (that mismatch was the original bug). See
+        _fit_font_for_width's docstring for why this checks
+        isinstance(..., BDFFont) rather than trusting font_choice."""
+        candidate = self._load_font(start_size, bold=True)
+        if isinstance(candidate, BDFFont):
+            return candidate
 
         cache_key = (self.font_choice, text_a, text_b, max_width)
         if cache_key in self._fit_font_cache:
