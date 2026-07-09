@@ -79,13 +79,124 @@ FONT_CHOICES = {
     "5by7": os.path.join(PLUGIN_DIR, "fonts", "5by7_regular.ttf"),
     "4x6": os.path.join(PLUGIN_DIR, "fonts", "4x6-font.ttf"),
     "press_start_2p": os.path.join(PLUGIN_DIR, "fonts", "PressStart2P-Regular.ttf"),
+    "tom_thumb": os.path.join(PLUGIN_DIR, "fonts", "tom-thumb.bdf"),
     "system": None,
 }
+
+# Font choices backed by a real bitmap format (BDF) rather than a
+# scalable TrueType outline. These render every pixel exactly as
+# designed with zero anti-aliasing/rasterization softness -- no
+# FreeType involved at all -- and are NOT resizable (BDF is a single
+# fixed pixel size), so they skip the shrink-to-fit sizing logic used
+# for the TTF options.
+BDF_FONT_CHOICES = {"tom_thumb"}
 
 # Preference order for auto-discovering a bundled font from the main
 # LEDMatrix install, used only when font_choice is "system" or the
 # selected bundled file is missing for some reason.
 FONT_NAME_PREFERENCE = ["press", "pixel", "matrix", "arcade", "8x8", "4x6", "retro"]
+
+
+class BDFFont:
+    """Minimal BDF (Glyph Bitmap Distribution Format) parser and
+    renderer. Pillow's ImageFont.truetype() can't load .bdf files at
+    all, and BDF glyphs are exact per-pixel bitmaps rather than vector
+    outlines -- so drawing them is just copying 1-bit pixel data
+    directly, with no rasterization/anti-aliasing step to introduce any
+    softness or halo. This is intentionally tiny: it only implements
+    enough of BDF to render basic Latin text (letters, digits, and the
+    handful of punctuation marks this plugin actually uses)."""
+
+    def __init__(self, path: str):
+        self.glyphs: Dict[int, Dict[str, Any]] = {}
+        self.ascent = 0
+        self.descent = 0
+        self._parse(path)
+
+    def _parse(self, path: str):
+        with open(path, "r", errors="replace") as f:
+            lines = f.read().splitlines()
+        i, n = 0, len(lines)
+        cur: Optional[Dict[str, Any]] = None
+        while i < n:
+            line = lines[i].strip()
+            if line.startswith("FONT_ASCENT"):
+                self.ascent = int(line.split()[1])
+            elif line.startswith("FONT_DESCENT"):
+                self.descent = int(line.split()[1])
+            elif line.startswith("STARTCHAR"):
+                cur = {}
+            elif line.startswith("ENCODING") and cur is not None:
+                cur["encoding"] = int(line.split()[1])
+            elif line.startswith("DWIDTH") and cur is not None:
+                cur["dwidth"] = int(line.split()[1])
+            elif line.startswith("BBX") and cur is not None:
+                p = line.split()
+                cur["bbw"], cur["bbh"] = int(p[1]), int(p[2])
+                cur["bbxoff"], cur["bbyoff"] = int(p[3]), int(p[4])
+            elif line.startswith("BITMAP") and cur is not None:
+                rows = []
+                for _ in range(cur.get("bbh", 0)):
+                    i += 1
+                    hexrow = lines[i].strip()
+                    nbits = len(hexrow) * 4
+                    val = int(hexrow, 16) if hexrow else 0
+                    bits = [(val >> (nbits - 1 - b)) & 1 for b in range(cur["bbw"])]
+                    rows.append(bits)
+                cur["rows"] = rows
+            elif line.startswith("ENDCHAR") and cur is not None:
+                if "encoding" in cur:
+                    self.glyphs[cur["encoding"]] = cur
+                cur = None
+            i += 1
+
+    def _glyph(self, ch: str) -> Optional[Dict[str, Any]]:
+        return self.glyphs.get(ord(ch))
+
+    def textbbox(self, text: str) -> Tuple[int, int, int, int]:
+        """Mimics ImageDraw.textbbox((0,0), text, font=...) closely
+        enough for this plugin's centering/width-fit math: returns
+        (left, top, right, bottom) with (0,0) as the text origin."""
+        cursor_x = 0
+        min_top: Optional[int] = None
+        max_bottom: Optional[int] = None
+        for ch in text:
+            g = self._glyph(ch)
+            if g is None:
+                cursor_x += 4
+                continue
+            glyph_top = self.ascent - (g["bbyoff"] + g["bbh"])
+            glyph_bottom = glyph_top + g["bbh"]
+            min_top = glyph_top if min_top is None else min(min_top, glyph_top)
+            max_bottom = glyph_bottom if max_bottom is None else max(max_bottom, glyph_bottom)
+            cursor_x += g.get("dwidth", 4)
+        if min_top is None:
+            min_top, max_bottom = 0, 0
+        return (0, min_top, cursor_x, max_bottom)
+
+    def draw(self, image: Image.Image, xy: Tuple[int, int], text: str, fill: Tuple[int, int, int]):
+        x0, y0 = xy
+        cursor_x = x0
+        img_w, img_h = image.size
+        for ch in text:
+            g = self._glyph(ch)
+            if g is None:
+                cursor_x += 4
+                continue
+            glyph_top = self.ascent - (g["bbyoff"] + g["bbh"])
+            for row_idx, row in enumerate(g.get("rows", [])):
+                py = y0 + glyph_top + row_idx
+                if py < 0 or py >= img_h:
+                    continue
+                for col_idx, bit in enumerate(row):
+                    if not bit:
+                        continue
+                    px = cursor_x + g["bbxoff"] + col_idx
+                    if 0 <= px < img_w:
+                        image.putpixel((px, py), fill)
+            cursor_x += g.get("dwidth", 4)
+
+
 
 
 class TidbytBaseballPlugin(BasePlugin):
@@ -153,7 +264,7 @@ class TidbytBaseballPlugin(BasePlugin):
         self.base_empty_color = tuple(cfg.get("base_empty_color", [95, 95, 95]))
         self.out_fill_color = tuple(cfg.get("out_fill_color", [255, 140, 0]))
         self.out_empty_color = tuple(cfg.get("out_empty_color", [120, 120, 120]))
-        self.font_choice = cfg.get("font_choice", "5by7")
+        self.font_choice = cfg.get("font_choice", "tom_thumb")
         self.show_batter_name = cfg.get("show_batter_name", True)
         self.test_mode = cfg.get("test_mode", False)
 
@@ -202,17 +313,37 @@ class TidbytBaseballPlugin(BasePlugin):
                     return os.path.join(fonts_dir, f)
         return os.path.join(fonts_dir, sorted(files)[0])
 
-    def _load_font(self, size: int, bold: bool = False) -> ImageFont.FreeTypeFont:
+    def _load_font(self, size: int, bold: bool = False) -> Any:
         cache_key = (self.font_choice, size)
         if cache_key in self._font_cache:
             return self._font_cache[cache_key]
 
+        if self.font_choice in BDF_FONT_CHOICES:
+            # BDF is a fixed-pixel bitmap format -- there's no "size" to
+            # request, so every size maps to the same single instance.
+            # Cache it once under a size-independent key too.
+            bdf_key = (self.font_choice, "bdf")
+            if bdf_key in self._font_cache:
+                font = self._font_cache[bdf_key]
+            else:
+                bdf_path = FONT_CHOICES[self.font_choice]
+                try:
+                    font = BDFFont(bdf_path)
+                except Exception as e:
+                    self.logger.error(f"Failed to parse BDF font at {bdf_path}: {e}", exc_info=True)
+                    font = None
+                self._font_cache[bdf_key] = font
+            if font is not None:
+                self._font_cache[cache_key] = font
+                return font
+            # fall through to TTF/system candidates below if BDF parsing failed
+
         candidates = []
 
         bundled_path = FONT_CHOICES.get(self.font_choice)
-        if bundled_path and os.path.isfile(bundled_path):
+        if bundled_path and os.path.isfile(bundled_path) and self.font_choice not in BDF_FONT_CHOICES:
             candidates.append(bundled_path)
-        elif self.font_choice != "system":
+        elif self.font_choice != "system" and self.font_choice not in BDF_FONT_CHOICES:
             self.logger.warning(
                 f"font_choice '{self.font_choice}' bundled file not found at "
                 f"expected path ({bundled_path}); falling back to auto-discovery / system font."
@@ -256,11 +387,34 @@ class TidbytBaseballPlugin(BasePlugin):
         self._font_cache[cache_key] = font
         return font
 
-    def _fit_font_for_width(self, draw, text: str, max_width: int, start_size: int, min_size: int = 4) -> ImageFont.FreeTypeFont:
+    def _measure(self, font: Any, text: str) -> Tuple[int, int, int, int]:
+        """Unified text bounding-box measurement for either a BDFFont or
+        a normal PIL font, so the rest of the code doesn't need to care
+        which one is active."""
+        if isinstance(font, BDFFont):
+            return font.textbbox(text)
+        tmp_draw = ImageDraw.Draw(Image.new("RGB", (1, 1)))
+        return tmp_draw.textbbox((0, 0), text, font=font)
+
+    def _render_text(self, image: Image.Image, xy: Tuple[int, int], text: str, font: Any, fill: Tuple[int, int, int]):
+        """Unified text drawing for either a BDFFont (direct pixel
+        writes, no anti-aliasing) or a normal PIL font (draw.text)."""
+        if isinstance(font, BDFFont):
+            font.draw(image, xy, text, fill)
+        else:
+            ImageDraw.Draw(image).text(xy, text, font=font, fill=fill)
+
+    def _fit_font_for_width(self, draw, text: str, max_width: int, start_size: int, min_size: int = 4) -> Any:
         """Shrinks the font size until `text` fits within max_width.
         Works regardless of which font got auto-discovered, since
         different fonts have very different glyph widths (this is what
-        caused double-digit scores to overflow before)."""
+        caused double-digit scores to overflow before). BDF fonts are a
+        fixed size, so this just returns the BDF font directly without
+        attempting to shrink it -- they're compact enough by design to
+        not need it (see plugin README)."""
+        if self.font_choice in BDF_FONT_CHOICES:
+            return self._load_font(start_size, bold=True)
+
         cache_key = (self.font_choice, text, max_width)
         if cache_key in self._fit_font_cache:
             return self._fit_font_cache[cache_key]
@@ -269,7 +423,7 @@ class TidbytBaseballPlugin(BasePlugin):
         chosen = None
         while size >= min_size:
             font = self._load_font(size, bold=True)
-            bbox = draw.textbbox((0, 0), text, font=font)
+            bbox = self._measure(font, text)
             if bbox[2] - bbox[0] <= max_width:
                 chosen = font
                 break
@@ -280,11 +434,14 @@ class TidbytBaseballPlugin(BasePlugin):
         self._fit_font_cache[cache_key] = chosen
         return chosen
 
-    def _fit_font_for_pair(self, draw, text_a: str, text_b: str, max_width: int, start_size: int, min_size: int = 4) -> ImageFont.FreeTypeFont:
+    def _fit_font_for_pair(self, draw, text_a: str, text_b: str, max_width: int, start_size: int, min_size: int = 4) -> Any:
         """Like _fit_font_for_width, but sizes for whichever of the two
         strings is wider, so both team columns render at the SAME font
         size rather than each shrinking independently based on its own
         text length (that mismatch was the original bug)."""
+        if self.font_choice in BDF_FONT_CHOICES:
+            return self._load_font(start_size, bold=True)
+
         cache_key = (self.font_choice, text_a, text_b, max_width)
         if cache_key in self._fit_font_cache:
             return self._fit_font_cache[cache_key]
@@ -293,8 +450,8 @@ class TidbytBaseballPlugin(BasePlugin):
         chosen = None
         while size >= min_size:
             font = self._load_font(size, bold=True)
-            bbox_a = draw.textbbox((0, 0), text_a, font=font)
-            bbox_b = draw.textbbox((0, 0), text_b, font=font)
+            bbox_a = self._measure(font, text_a)
+            bbox_b = self._measure(font, text_b)
             widest = max(bbox_a[2] - bbox_a[0], bbox_b[2] - bbox_b[0])
             if widest <= max_width:
                 chosen = font
@@ -514,7 +671,13 @@ class TidbytBaseballPlugin(BasePlugin):
         if size is None:
             width, height = self._get_dimensions()
             col_w = (width // 2) // 2
-            size = max(min(col_w, height) - 2, 12)
+            # Slightly larger than the column itself -- allowed to bleed
+            # a small amount off the panel edges (and, since two columns
+            # sit side by side, potentially a couple px into the
+            # neighboring team's column too, though most team logos
+            # taper to transparent near their outer edge so this is
+            # rarely very visible in practice).
+            size = max(min(col_w, height) + 4, 12)
         game["away_logo"] = self._get_team_logo(game["away_abbr"], game.get("away_logo_url"), size)
         game["home_logo"] = self._get_team_logo(game["home_abbr"], game.get("home_logo_url"), size)
 
@@ -566,7 +729,7 @@ class TidbytBaseballPlugin(BasePlugin):
 
         game = self._current_game()
         if game is None:
-            draw.text((4, height // 2 - 4), "No Game", font=self.font_small, fill=(180, 180, 180))
+            self._render_text(image, (4, height // 2 - 4), "No Game", self.font_small, (180, 180, 180))
             self._push_image(image, force_clear)
             return
 
@@ -612,14 +775,14 @@ class TidbytBaseballPlugin(BasePlugin):
         self._draw_diamond(draw, diamond_x, diamond_y, diamond_w, diamond_available_h, game)
 
         count_text = f"{game['balls']}-{game['strikes']}"
-        self._draw_count(draw, right_x0 + 1, lower_y, game)
+        self._draw_count(image, right_x0 + 1, lower_y, game)
 
         if self.show_batter_name:
-            count_bbox = draw.textbbox((0, 0), count_text, font=self.font_count)
+            count_bbox = self._measure(self.font_count, count_text)
             count_w = count_bbox[2] - count_bbox[0]
             batter_x = right_x0 + 1 + count_w + 4
             batter_max_w = (right_x0 + right_w) - batter_x
-            self._draw_batter(draw, batter_x, lower_y, batter_max_w, game.get("batter_name"))
+            self._draw_batter(image, draw, batter_x, lower_y, batter_max_w, game.get("batter_name"))
 
         self._push_image(image, force_clear)
 
@@ -689,14 +852,18 @@ class TidbytBaseballPlugin(BasePlugin):
         computed once by the caller from BOTH columns' text, so the two
         teams always render at the same size."""
         text_line = f"{abbr} {score}"
-        line_bbox = draw.textbbox((0, 0), text_line, font=font)
+        line_bbox = self._measure(font, text_line)
         line_h = line_bbox[3] - line_bbox[1]
         line_w = line_bbox[2] - line_bbox[0]
         bar_h = line_h + 4
 
         if logo is not None:
-            logo_x = x0 + max((w - logo.width) // 2, 0)
-            logo_y = y0 + max((h - logo.height) // 2, 0)
+            # No max(...,0) clamp: when the logo is bigger than the
+            # column (allowed to bleed off the edges per request), this
+            # keeps it centered with a symmetric negative offset instead
+            # of snapping to the left/top edge.
+            logo_x = x0 + (w - logo.width) // 2
+            logo_y = y0 + (h - logo.height) // 2
             image.paste(logo, (logo_x, logo_y), logo)
 
         bar_y0 = y0 + h - bar_h
@@ -706,7 +873,7 @@ class TidbytBaseballPlugin(BasePlugin):
         tx = x0 + max((w - line_w) // 2, 0)
         tx = min(tx, x0 + w - line_w) if line_w < w else x0
         ty = bar_y0 + max((bar_h - line_h) // 2, 0) - line_bbox[1]
-        draw.text((tx, ty), text_line, font=font, fill=text_color)
+        self._render_text(image, (tx, ty), text_line, font, text_color)
 
     def _draw_diamond(self, draw, x, y, w, h, game):
         """`h` is the actual vertical space available for the whole
@@ -756,13 +923,9 @@ class TidbytBaseballPlugin(BasePlugin):
         bottom -- plus the inning number, vertically centered on the
         triangle using its actual measured glyph height.
 
-        Drawn with a HARD edge (no anti-aliasing) rather than through
-        _draw_smooth_polygon: at only 6px tall, supersampling +
-        downsampling was producing a soft/blobby shape that read as
-        "not really a triangle" rather than a clean one. The diamond
-        (bigger, benefits more from smoothing) still uses the
-        anti-aliased path -- this is a case where AA hurts rather than
-        helps because the shape is too small for it."""
+        Drawn with a HARD edge (no anti-aliasing): at only 6px tall,
+        supersampling + downsampling was producing a soft/blobby shape
+        that read as "not really a triangle" rather than a clean one."""
         tri_size = 6
         draw = ImageDraw.Draw(image)
         if game["inning_half"]:
@@ -772,16 +935,23 @@ class TidbytBaseballPlugin(BasePlugin):
         draw.polygon(pts, fill=(255, 255, 255))
 
         number_text = str(game["inning"])
-        bbox = draw.textbbox((0, 0), number_text, font=self.font_tiny)
+        bbox = self._measure(self.font_tiny, number_text)
         glyph_h = bbox[3] - bbox[1]
-        text_y = y + (tri_size - glyph_h) // 2 - bbox[1]
-        draw.text((x + tri_size + 3, text_y), number_text, font=self.font_tiny, fill=(255, 255, 255))
+        # The triangle's polygon fill spans y to y+tri_size inclusive on
+        # both ends (verified by rendering both orientations and
+        # measuring actual white-pixel extent), so its true vertical
+        # center is at y + tri_size//2. NOTE: don't use round() here --
+        # Python's round() does banker's rounding (round(2.5) == 2, not
+        # 3), which silently cancelled out this exact fix the first
+        # time around. Plain integer division does the right thing.
+        text_y = y + tri_size // 2 - glyph_h // 2 - bbox[1]
+        self._render_text(image, (x + tri_size + 3, text_y), number_text, self.font_tiny, (255, 255, 255))
 
-    def _draw_count(self, draw, x, y, game):
+    def _draw_count(self, image, x, y, game):
         count_text = f"{game['balls']}-{game['strikes']}"
-        draw.text((x, y), count_text, font=self.font_count, fill=(255, 200, 0))
+        self._render_text(image, (x, y), count_text, self.font_count, (255, 200, 0))
 
-    def _draw_batter(self, draw, x, y, max_width, batter_name):
+    def _draw_batter(self, image, draw, x, y, max_width, batter_name):
         """Draws 'F. Lastname' for whoever is currently at bat, shrunk
         to fit whatever width remains next to the count. Skips silently
         (no placeholder text) if ESPN didn't provide a batter name --
@@ -791,10 +961,10 @@ class TidbytBaseballPlugin(BasePlugin):
             return
         formatted = self._format_batter_name(batter_name)
         font = self._fit_font_for_width(draw, formatted, max_width, start_size=7, min_size=4)
-        bbox = draw.textbbox((0, 0), formatted, font=font)
+        bbox = self._measure(font, formatted)
         if bbox[2] - bbox[0] > max_width:
             return  # still doesn't fit even at the smallest size -- skip rather than overflow
-        draw.text((x, y), formatted, font=font, fill=(200, 200, 200))
+        self._render_text(image, (x, y), formatted, font, (200, 200, 200))
 
     def _draw_outs(self, draw, x, y, w, game):
         square = 3

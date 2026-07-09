@@ -209,22 +209,54 @@ rather than failing silently into the generic fallback.
   layout numbers working out that way -- not a deliberate bump, just
   where the math landed.
 
-## About BDF fonts
+## Logo size and inning-number centering (latest tweaks)
 
-If you have `.bdf` files from the same source, they're worth trying:
-BDF is a genuine bitmap font format (exact per-pixel glyph definitions,
-no vector outline to rasterize), so it sidesteps FreeType's
-anti-aliasing entirely -- which may be contributing to softness even
-beyond the faux-bold issue above, especially if `5by7`/`4x6` are
-TrueType conversions of originally-bitmap designs rather than true
-embedded bitmap strikes.
+- **Logos are bigger** and now allowed to bleed off the panel/column
+  edges intentionally (removed the clamp that was snapping them to
+  the top-left corner once they exceeded the column size). One
+  trade-off worth knowing: since the two team columns sit side by
+  side, a big enough logo can bleed a few px into the *neighboring*
+  team's column too -- in practice this is rarely very visible since
+  most team logos taper to transparent near their outer edge, but if
+  it looks off with a particular team's logo shape, the fix is
+  tuning the `+ 4` in `_resolve_logos()` back down.
+- **Inning number centering was actually off by 1px**, not just a
+  matter of preference -- I measured the triangle's real rendered
+  pixel extent for both orientations (top/bottom of inning) and found
+  its vertical center was consistently 1px lower than where the number
+  was landing. Fixed and re-verified: both orientations now measure an
+  exact matching center (not just "close").
 
-**Pillow doesn't load `.bdf` directly** the way it does `.ttf` --
-`ImageFont.truetype()` won't accept it. Send me the actual `.bdf`
-file(s) and I'll add a small parser/renderer that reads the glyph
-bitmaps directly and composites them as pure on/off pixels, with zero
-anti-aliasing -- which should be the most direct fix for pixel-perfect
-matching to the rest of your display's look.
+
+
+`font_choice: "tom_thumb"` is now the default. It uses **Tom Thumb**, a
+well-known 3x5 pixel BDF font (MIT licensed) purpose-built for tiny LED
+displays -- the same one referenced in hzeller/rpi-rgb-led-matrix's own
+font collection. Bundled at `fonts/tom-thumb.bdf`.
+
+**Why this should be the most robust option**: Pillow's `ImageFont.truetype()`
+can't load `.bdf` at all, and BDF glyphs are exact per-pixel bitmaps
+rather than vector outlines FreeType has to rasterize. So this plugin
+includes its own minimal BDF parser/renderer (`BDFFont` class in
+`manager.py`) that reads the glyph bitmaps directly from the file and
+writes each "on" pixel straight to the image with `putpixel()` --
+there's no rasterization step at all, so there's nothing that *can*
+introduce anti-aliasing, halos, or softness. I verified this by
+checking the actual rendered pixel values contain only the exact
+background/text colors with zero in-between shades, across every text
+element (team names, inning number, count, batter name).
+
+**One real limitation**: BDF is a fixed pixel size (Tom Thumb's glyphs
+are only 3-4px wide), so it doesn't go through the shrink-to-fit sizing
+logic the TTF options use -- there's only one size. In practice this
+is fine since it's already extremely compact (comfortably fits
+`"ABBR SCORE"` including double-digit scores without ever needing to
+shrink), but if you ever see it overflow a row, that's the reason why,
+and the fix would be different from the TTF options (abbreviating text
+rather than picking a smaller size).
+
+Other TTF options (`5by7`, `4x6`, `press_start_2p`) are still available
+via `font_choice` if you'd rather compare looks side by side.
 
 ## Data source
 

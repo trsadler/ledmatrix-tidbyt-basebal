@@ -144,10 +144,11 @@
         "5by7",
         "4x6",
         "press_start_2p",
+        "tom_thumb",
         "system"
       ],
-      "default": "5by7",
-      "description": "Pixel font for team abbreviation/score text, bundled directly with this plugin (pulled from the same assets/fonts/ folder LEDMatrix ships with). 5by7 and 4x6 are compact and fit this layout well; press_start_2p is wider per-character and renders very small in this column; system falls back to a generic bold monospace font."
+      "default": "tom_thumb",
+      "description": "Pixel font for team abbreviation/score text, bundled directly with this plugin. 5by7 and 4x6 are compact TrueType pixel fonts. tom_thumb is a genuine BDF bitmap font (3x5, MIT licensed) rendered with zero anti-aliasing -- exact pixel-for-pixel, no FreeType rasterization involved. press_start_2p is wider per-character and renders very small in this column. system falls back to a generic bold monospace font."
     },
     "show_batter_name": {
       "type": "boolean",
