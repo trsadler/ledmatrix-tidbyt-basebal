@@ -1,0 +1,15 @@
+{
+  "tidbyt-baseball-scoreboard": {
+    "enabled": true,
+    "favorite_teams": ["PHI"],
+    "update_interval_seconds": 300,
+    "live_update_interval_seconds": 15,
+    "display_duration": 20,
+    "away_color": [0, 142, 226],
+    "home_color": [200, 16, 46],
+    "use_team_colors": true,
+    "show_logos": true,
+    "logo_dir": "assets/sports/mlb_logos",
+    "test_mode": false
+  }
+}

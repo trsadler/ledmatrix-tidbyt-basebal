@@ -1,0 +1,68 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Tidbyt-Style Baseball Scoreboard",
+  "type": "object",
+  "properties": {
+    "enabled": {
+      "type": "boolean",
+      "default": true,
+      "description": "Enable/disable the plugin"
+    },
+    "favorite_teams": {
+      "type": "array",
+      "items": { "type": "string" },
+      "default": ["PHI"],
+      "description": "ESPN team abbreviations to track, e.g. PHI, NYY, DET"
+    },
+    "update_interval_seconds": {
+      "type": "integer",
+      "default": 300,
+      "minimum": 30,
+      "description": "How often to poll ESPN when no game is live"
+    },
+    "live_update_interval_seconds": {
+      "type": "integer",
+      "default": 15,
+      "minimum": 5,
+      "description": "How often to poll ESPN while a favorite team's game is live"
+    },
+    "display_duration": {
+      "type": "number",
+      "default": 20,
+      "description": "Seconds to show this plugin per rotation"
+    },
+    "away_color": {
+      "type": "array",
+      "items": { "type": "integer" },
+      "default": [0, 142, 226],
+      "description": "RGB fallback color for the away team block (top-left)"
+    },
+    "home_color": {
+      "type": "array",
+      "items": { "type": "integer" },
+      "default": [200, 16, 46],
+      "description": "RGB fallback color for the home team block (bottom-left)"
+    },
+    "use_team_colors": {
+      "type": "boolean",
+      "default": true,
+      "description": "Pull each team's real primary color from ESPN instead of using the fallback colors above"
+    },
+    "show_logos": {
+      "type": "boolean",
+      "default": true,
+      "description": "Show each team's logo at the far left of its color block"
+    },
+    "logo_dir": {
+      "type": "string",
+      "default": "assets/sports/mlb_logos",
+      "description": "Path (relative to the LEDMatrix install root) to bundled team logo PNGs, named e.g. PHI.png. Falls back to downloading from ESPN if a team's file isn't found here."
+    },
+    "test_mode": {
+      "type": "boolean",
+      "default": false,
+      "description": "Render a fake in-progress game instead of calling ESPN (for layout testing)"
+    }
+  },
+  "required": ["enabled", "favorite_teams"]
+}

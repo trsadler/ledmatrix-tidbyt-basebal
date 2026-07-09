@@ -1,0 +1,12 @@
+{
+  "id": "tidbyt-baseball-scoreboard",
+  "name": "Tidbyt-Style Baseball Scoreboard",
+  "description": "Custom MLB live-game scoreboard styled after the Tidbyt baseball app: split team-color panel on the left, diamond/inning/count/outs on the right.",
+  "author": "Thomas",
+  "version": "1.0.0",
+  "class_name": "TidbytBaseballPlugin",
+  "entry_point": "manager.py",
+  "display_modes": ["tidbyt_baseball_live"],
+  "ledmatrix_min": "2.0.0",
+  "license": "GPL-3.0-or-later"
+}
