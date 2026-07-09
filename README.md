@@ -191,6 +191,41 @@ rather than failing silently into the generic fallback.
 - **Inning indicator now has a proper top margin** (2px) instead of
   sitting almost flush against the panel's physical top edge.
 
+## Fixes: text halo and diamond outline thickness
+
+- **The "halo/extra stroke" around text was the faux-bold trick**: text
+  was being drawn twice, offset by 1px, to fake a bolder weight. At
+  these tiny glyph sizes that reads as a double-struck ghost image
+  rather than actual boldness. Removed entirely -- text is now drawn
+  once, plainly, using the font's own weight.
+- **The diamond's unoccupied-base outline is now an exact 1px line**:
+  it was being run through the same anti-aliasing helper as the inning
+  triangle (supersample 4x + LANCZOS downsample), which blurred a
+  requested 1px outline into something visually thicker. Switched to
+  PIL's plain `polygon(..., outline=..., width=1)` -- verified by
+  checking the actual rendered pixel values contain no in-between
+  (anti-aliased) shades, only pure background/outline/fill colors.
+- The diamond ended up marginally bigger as a side effect of these
+  layout numbers working out that way -- not a deliberate bump, just
+  where the math landed.
+
+## About BDF fonts
+
+If you have `.bdf` files from the same source, they're worth trying:
+BDF is a genuine bitmap font format (exact per-pixel glyph definitions,
+no vector outline to rasterize), so it sidesteps FreeType's
+anti-aliasing entirely -- which may be contributing to softness even
+beyond the faux-bold issue above, especially if `5by7`/`4x6` are
+TrueType conversions of originally-bitmap designs rather than true
+embedded bitmap strikes.
+
+**Pillow doesn't load `.bdf` directly** the way it does `.ttf` --
+`ImageFont.truetype()` won't accept it. Send me the actual `.bdf`
+file(s) and I'll add a small parser/renderer that reads the glyph
+bitmaps directly and composites them as pure on/off pixels, with zero
+anti-aliasing -- which should be the most direct fix for pixel-perfect
+matching to the rest of your display's look.
+
 ## Data source
 
 ESPN's public scoreboard endpoint, no API key required:

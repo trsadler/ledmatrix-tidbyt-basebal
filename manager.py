@@ -609,7 +609,7 @@ class TidbytBaseballPlugin(BasePlugin):
         diamond_available_h = (lower_y - 2) - diamond_y  # leave a clear gap before the bottom row
         diamond_w = int(right_w * 0.5)
         diamond_x = right_x0 + (right_w - diamond_w) // 2
-        self._draw_diamond(image, diamond_x, diamond_y, diamond_w, diamond_available_h, game)
+        self._draw_diamond(draw, diamond_x, diamond_y, diamond_w, diamond_available_h, game)
 
         count_text = f"{game['balls']}-{game['strikes']}"
         self._draw_count(draw, right_x0 + 1, lower_y, game)
@@ -670,45 +670,17 @@ class TidbytBaseballPlugin(BasePlugin):
             return full_name
         return f"{parts[0][0]}. {' '.join(parts[1:])}"
 
-    def _draw_bold_text(self, draw, xy, text, font, fill):
-        """Horizontal-only faux-bold. The original version also offset
-        vertically (0,1), which at these very small pixel heights (5-7px
-        tall glyphs) smears strokes into the row above/below and hurts
-        legibility more than it helps -- that's the likely cause of the
-        'fonts not readable' feedback. Horizontal-only still adds some
-        weight without that vertical smearing."""
-        x, y = xy
-        for dx, dy in ((0, 0), (1, 0)):
-            draw.text((x + dx, y + dy), text, font=font, fill=fill)
+    # NOTE: this plugin previously had a faux-bold text helper and an
+    # anti-aliased polygon helper (supersample + LANCZOS downsample).
+    # Both turned out to hurt more than help at this pixel scale: the
+    # faux-bold's extra offset copy read as a halo/ghost rather than
+    # actual boldness, and anti-aliasing softened small shapes (the
+    # inning triangle, the base diamonds) into blobs instead of crisp
+    # shapes. Everything is now drawn plainly with PIL's normal
+    # hard-edged polygon/text calls, matching the pixel-art aesthetic
+    # the bundled fonts are designed for.
 
-    # ---- anti-aliasing helper -----------------------------------------
-    def _draw_smooth_polygon(self, image, points, fill=None, outline=None, width=1, supersample=4, padding=2):
-        """Draws a polygon anti-aliased by rendering it at `supersample`x
-        resolution on a transparent layer and downsampling with LANCZOS,
-        then alpha-composites it onto `image`. This is what fixes jagged
-        diagonal edges on triangles/diamonds -- real RGB LED panels can
-        display partial brightness, so smoothed edges genuinely look
-        better rather than just being a software-only nicety."""
-        xs = [p[0] for p in points]
-        ys = [p[1] for p in points]
-        min_x, max_x = min(xs) - padding, max(xs) + padding
-        min_y, max_y = min(ys) - padding, max(ys) + padding
-        w = max(int(round(max_x - min_x)), 1)
-        h = max(int(round(max_y - min_y)), 1)
 
-        temp = Image.new("RGBA", (w * supersample, h * supersample), (0, 0, 0, 0))
-        td = ImageDraw.Draw(temp)
-        scaled_pts = [((x - min_x) * supersample, (y - min_y) * supersample) for x, y in points]
-
-        if fill is not None:
-            fill_rgba = fill if len(fill) == 4 else tuple(fill) + (255,)
-            td.polygon(scaled_pts, fill=fill_rgba)
-        if outline is not None:
-            outline_rgba = outline if len(outline) == 4 else tuple(outline) + (255,)
-            td.polygon(scaled_pts, outline=outline_rgba, width=max(width * supersample, 1))
-
-        small = temp.resize((w, h), Image.LANCZOS)
-        image.paste(small, (int(round(min_x)), int(round(min_y))), small)
 
     def _draw_team_column(self, image, draw, x0, y0, w, h, abbr, score, logo, text_color, bg_color, font):
         """Logo fills nearly the whole column (as large as the panel
@@ -734,17 +706,20 @@ class TidbytBaseballPlugin(BasePlugin):
         tx = x0 + max((w - line_w) // 2, 0)
         tx = min(tx, x0 + w - line_w) if line_w < w else x0
         ty = bar_y0 + max((bar_h - line_h) // 2, 0) - line_bbox[1]
-        self._draw_bold_text(draw, (tx, ty), text_line, font, text_color)
+        draw.text((tx, ty), text_line, font=font, fill=text_color)
 
-    def _draw_diamond(self, image, x, y, w, h, game):
+    def _draw_diamond(self, draw, x, y, w, h, game):
         """`h` is the actual vertical space available for the whole
         diamond shape (from the caller's layout, not a scale factor) --
         `half` is derived so the diamond's total vertical span (3*half+2)
         and horizontal span (2*half+6) both fit inside h/w. This is
         what guarantees the diamond can never overlap the row above or
-        below it even as the rest of the layout changes; a fixed scale
-        factor doesn't know how much room neighboring rows are actually
-        using."""
+        below it even as the rest of the layout changes.
+
+        Drawn with PIL's plain polygon (no anti-aliasing) so the
+        unoccupied-base outline is an exact 1px line -- running it
+        through the supersample/downsample anti-aliasing helper was
+        blurring that 1px line into something that reads as thicker."""
         cx = x + w // 2
         max_half_by_height = max((h - 2) // 3, 3)
         max_half_by_width = max((w - 6) // 2, 3)
@@ -772,9 +747,9 @@ class TidbytBaseballPlugin(BasePlugin):
                 (px - half, py),
             ]
             if occupied[base]:
-                self._draw_smooth_polygon(image, pts, fill=self.base_fill_color)
+                draw.polygon(pts, fill=self.base_fill_color)
             else:
-                self._draw_smooth_polygon(image, pts, outline=self.base_empty_color, width=1)
+                draw.polygon(pts, outline=self.base_empty_color, width=1)
 
     def _draw_inning(self, image, x, y, game):
         """Solid triangle -- point up for top of inning, point down for
