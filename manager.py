@@ -37,6 +37,7 @@ RGB PIL.Image internally and then tries, in order:
 
 import logging
 import os
+import re
 import threading
 import time
 from io import BytesIO
@@ -493,6 +494,66 @@ class TidbytBaseballPlugin(BasePlugin):
             font.draw(image, xy, text, fill)
         else:
             ImageDraw.Draw(image).text(xy, text, font=font, fill=fill)
+
+    def _ink_extent(self, font: Any, text: str) -> Tuple[int, int]:
+        """Renders `text` to a small scratch image and returns the
+        actual leftmost/rightmost columns containing ink (non-background
+        pixels) -- as opposed to the font's nominal advance width, which
+        for punctuation like ":" or "." often includes several columns
+        of blank design space the font author left for normal spacing.
+        Measuring real ink is what lets tightening work correctly
+        regardless of which font is active, rather than guessing a
+        fixed pixel offset tuned for one specific font."""
+        bbox = self._measure(font, text)
+        w = max(bbox[2] - bbox[0], 1) + 6
+        h = max(bbox[3] - bbox[1], 1) + 6
+        scratch = Image.new("RGB", (w, h), (0, 0, 0))
+        self._render_text(scratch, (3, 3), text, font, (255, 255, 255))
+        cols = [x for x in range(w) for y in range(h) if scratch.getpixel((x, y)) != (0, 0, 0)]
+        if not cols:
+            return (3, 3)
+        return (min(cols), max(cols))
+
+    def _draw_tight_join(self, image, x, y, font, fill, text_a: str, text_b: str, ink_gap: int = 1) -> int:
+        """Draws text_a then text_b immediately after it, with only
+        `ink_gap` background pixels between their actual rendered ink
+        -- not their nominal advance widths. This is what actually
+        tightens up spacing like "P:" or "T. Lastname": the blank space
+        people see isn't extra spacing added between characters, it's
+        blank design space baked into narrow glyphs (colons, periods)
+        that a font author left for normal-width spacing. Returns the
+        total pixel width used, for cursor advancement."""
+        self._render_text(image, (x, y), text_a, font, fill)
+        _, a_right_scratch = self._ink_extent(font, text_a)
+        a_right_actual = x + (a_right_scratch - 3)
+
+        b_left_scratch, b_right_scratch = self._ink_extent(font, text_b)
+        # Target: B's first ink column should land at (A's last ink
+        # column + 1 + ink_gap) -- the "+1" is because a_right_actual
+        # IS the last ink pixel, so the very next column is already 0
+        # gap; ink_gap blank columns after that is where B's ink starts.
+        b_x = (a_right_actual + 1 + ink_gap) - (b_left_scratch - 3)
+        self._render_text(image, (b_x, y), text_b, font, fill)
+
+        b_bbox = self._measure(font, text_b)
+        return (b_x + (b_bbox[2] - b_bbox[0])) - x
+
+    def _draw_name_tightened(self, image, xy, font, fill, name: str, ink_gap: int = 1) -> int:
+        """Draws a 'F. Lastname'-style string with the gap after the
+        initial+period tightened to `ink_gap` real pixels instead of
+        whatever blank space the space character/font design normally
+        leaves (measured as 6px of pure blank for tom_thumb's "T. " --
+        see the investigation that led to this). Falls back to a plain
+        render if the string doesn't match that pattern. Returns the
+        pixel width used."""
+        x, y = xy
+        m = re.match(r"^([A-Za-z]{1,2}\.) (.+)$", name)
+        if not m:
+            self._render_text(image, (x, y), name, font, fill)
+            bbox = self._measure(font, name)
+            return bbox[2] - bbox[0]
+        prefix, rest = m.group(1), m.group(2)
+        return self._draw_tight_join(image, x, y, font, fill, prefix, rest, ink_gap=ink_gap)
 
     def _fit_font_for_width(self, draw, text: str, max_width: int, start_size: int, min_size: int = 4) -> Any:
         """Shrinks the font size until `text` fits within max_width.
@@ -1432,7 +1493,27 @@ class TidbytBaseballPlugin(BasePlugin):
             if text_to_draw is None:
                 return 0
 
-        self._render_text(image, (x, y), text_to_draw, font, (180, 180, 220))
+        color = (180, 180, 220)
+        if text_to_draw == text:
+            # No truncation happened -- safe to apply the structured
+            # tight-join rendering (P-colon gap, and the initial+period
+            # to lastname gap, both tightened to real measured ink gaps
+            # instead of the font's natural blank design space).
+            if pitch_count is not None:
+                cursor_w = self._draw_tight_join(image, x, y, font, color, "P", ":", ink_gap=1)
+                count_x = x + cursor_w + 2
+                self._render_text(image, (count_x, y), str(pitch_count), font, color)
+                count_bbox = self._measure(font, str(pitch_count))
+                name_x = count_x + (count_bbox[2] - count_bbox[0]) + 3
+                self._draw_name_tightened(image, (name_x, y), font, color, name, ink_gap=1)
+            else:
+                self._draw_name_tightened(image, (x, y), font, color, name, ink_gap=1)
+        else:
+            # Truncated fallback -- just render the truncated fragment
+            # plainly rather than trying to re-derive tightened segment
+            # boundaries out of a string that's been cut mid-word.
+            self._render_text(image, (x, y), text_to_draw, font, color)
+
         final_bbox = self._measure(font, text_to_draw)
         return final_bbox[3] - final_bbox[1]
 
@@ -1476,7 +1557,12 @@ class TidbytBaseballPlugin(BasePlugin):
             if text_to_draw is None:
                 return  # nothing fits, not even a single truncated character
 
-        self._render_text(image, (x, y), text_to_draw, font, (200, 200, 200))
+        if text_to_draw == formatted:
+            self._draw_name_tightened(image, (x, y), font, (200, 200, 200), text_to_draw, ink_gap=1)
+        else:
+            # Truncated -- render plainly rather than re-deriving
+            # tightened segment boundaries from a cut-off string.
+            self._render_text(image, (x, y), text_to_draw, font, (200, 200, 200))
 
     def _draw_outs(self, draw, cx, center_y, game, size=3, gap=1):
         """Vertically stacked circles (top to bottom = out 1, 2, 3),

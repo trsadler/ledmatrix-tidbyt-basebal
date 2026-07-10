@@ -209,7 +209,40 @@ rather than failing silently into the generic fallback.
   layout numbers working out that way -- not a deliberate bump, just
   where the math landed.
 
-## Bigger outs circles, and "TEAM DUE UP" for mid-inning data gaps
+## Tightened spacing: "P:" and first-initial-to-lastname gaps
+
+Found the real cause: the "extra space" wasn't spacing added between
+characters, it was blank design space baked into narrow glyphs
+(colons, periods) that the font author left for normal-width spacing
+against a space character. Measured actual rendered ink pixels to
+confirm: a plain "P:" had a genuine 2px blank gap between P's ink and
+the colon's ink, and "T. Skubal" had a full 6px blank gap between the
+period and "S".
+
+Added `_ink_extent()` (measures real rendered ink columns, not the
+font's nominal advance width) and `_draw_tight_join()` (positions two
+pieces of text so there's exactly N real background pixels between
+their ink, regardless of which font is active). Used this to tighten:
+- The gap between "P" and ":" in the pitch-count row (now 1px)
+- The gap between the first-initial+period and the last name, for both
+  batter and pitcher names (also now 1px)
+
+Caught a real off-by-one bug while building this: my first version's
+gap math was consistently 1px tighter than requested (a nominal
+"ink_gap=1" was actually rendering as 0px, touching). Fixed and
+re-verified by measuring the actual rendered gap directly -- confirmed
+exactly 1px now, not just "looks about right."
+
+This only changes the final rendering step, not the width-fitting/
+truncation logic (which still measures the untruncated natural string
+width, so it's a strictly safe direction of error -- actual rendered
+width is now slightly less than what was measured, never more). If
+truncation still kicks in for a very long name, it falls back to a
+plain (untightened) render for that specific case, since re-deriving
+tightened segment boundaries out of a string that's been cut mid-word
+isn't worth the complexity.
+
+
 
 - **Outs circles**: increased from 3px to 4px. Re-verified the gap is
   still exactly 1px (not touching) by directly measuring rendered
