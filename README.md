@@ -209,7 +209,43 @@ rather than failing silently into the generic fallback.
   layout numbers working out that way -- not a deliberate bump, just
   where the math landed.
 
-## Fixed: everything freezing after the first successful update
+## Fixed: data still not updating (root cause was the core scheduler, not an exception)
+
+The exception-handling fix above didn't resolve it, which ruled out
+that hypothesis and confirmed the other one: **the core LEDMatrix
+scheduler most likely only calls this plugin's `update()` when its
+rotation slot is actively on screen**, not continuously in the
+background. This plugin's own `live_update_interval_seconds` logic is
+useless if `update()` itself isn't being invoked often enough by
+something external.
+
+**Fix: this plugin now manages its own refresh cycle**, independent of
+however often (or rarely) the core calls `update()`. A background
+daemon thread (started in `__init__`) checks every 5 seconds whether
+it's time to poll ESPN again, using the exact same interval logic and
+exception-safety as before. If the core DOES call `update()`
+regularly, that still works too -- both paths share the same
+`_maybe_refresh()` method, gated by the same `last_fetch_time` check,
+so there's no double-fetching risk either way.
+
+Added a `threading.Lock` around all the shared game-state reads/writes
+(`live_games`, `fallback_game`, `current_index`, `last_fetch_time`)
+since now two different threads (the core's calling thread and this
+plugin's own background thread) can touch that state concurrently.
+
+**Verified concretely**: ran the plugin with zero external calls to
+`update()`/`display()` at all -- just started it and slept -- and
+confirmed via logging that it fetched fresh data on its own schedule
+(3 fetches over 17 seconds at a short test interval, each ~5s apart,
+matching the background thread's check cadence). This proves data now
+refreshes regardless of the core's calling pattern.
+
+Also added a `cleanup()` method that stops the background thread
+cleanly if the core supports calling it on plugin disable/unload (a
+no-op if it doesn't -- the thread is a daemon thread either way, so it
+won't prevent the process from exiting).
+
+
 
 Since you confirmed the **score** was frozen too (not just balls/
 strikes/batter), that ruled out a narrow bug in one specific field and

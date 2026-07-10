@@ -37,6 +37,7 @@ RGB PIL.Image internally and then tries, in order:
 
 import logging
 import os
+import threading
 import time
 from io import BytesIO
 from typing import Optional, Dict, Any, Tuple, List
@@ -273,6 +274,45 @@ class TidbytBaseballPlugin(BasePlugin):
                 f"requested sizes. Check all the errors logged above for why."
             )
 
+        # Guards concurrent access to live_games/fallback_game/current_index
+        # between the background thread below and display()/update() being
+        # called from whatever thread the core scheduler uses.
+        self._data_lock = threading.Lock()
+
+        # IMPORTANT: this plugin no longer relies solely on the core
+        # calling update() often enough. Earlier debugging (score
+        # staying frozen after the first successful load, even after
+        # fixing an unrelated exception-swallowing bug) pointed at the
+        # core scheduler likely only calling update() when this
+        # plugin's rotation slot is active on screen -- not
+        # continuously in the background. Rather than depend on that,
+        # this background thread polls ESPN on its own schedule,
+        # completely independent of how often update()/display() get
+        # invoked externally. update() still exists and still works if
+        # the core DOES call it regularly (both paths share the same
+        # underlying _maybe_refresh() logic, gated by the same
+        # last_fetch_time check, so there's no duplicate-fetch risk).
+        self._stop_background_thread = threading.Event()
+        self._background_thread = threading.Thread(
+            target=self._background_update_loop, daemon=True, name=f"{plugin_id}-updater"
+        )
+        self._background_thread.start()
+
+    def _background_update_loop(self):
+        """Runs for the lifetime of the process, independent of
+        whatever the core scheduler's calling pattern for update() is.
+        Sleeps briefly between checks so it responds quickly once a
+        game goes live, but the actual fetch still only happens as
+        often as live_update_interval_seconds/update_interval_seconds
+        allow (via _maybe_refresh's own interval check) -- this thread
+        just guarantees SOMETHING is checking regularly."""
+        while not self._stop_background_thread.is_set():
+            try:
+                self._maybe_refresh()
+            except Exception as e:
+                self.logger.error(f"Background updater thread hit an unexpected error: {e}", exc_info=True)
+            self._stop_background_thread.wait(timeout=5)
+
     # ------------------------------------------------------------------
     # Config handling
     # ------------------------------------------------------------------
@@ -301,7 +341,8 @@ class TidbytBaseballPlugin(BasePlugin):
         self.config = new_config
         old_font_choice = getattr(self, "font_choice", None)
         self._derive_settings()
-        self.last_fetch_time = 0
+        with self._data_lock:
+            self.last_fetch_time = 0
         if self.font_choice != old_font_choice:
             # Selected font changed -- clear caches so _load_font picks
             # up the new one instead of returning a stale cached object.
@@ -310,6 +351,13 @@ class TidbytBaseballPlugin(BasePlugin):
             self.font_small = self._load_font(9)
             self.font_tiny = self._load_font(7)
             self.font_count = self._load_font(6)
+
+    def cleanup(self):
+        """Called by the core on plugin unload/disable, if it supports
+        that -- stops the background updater thread cleanly. Harmless
+        no-op risk if the core never calls this (the thread is a daemon
+        thread anyway, so it won't block process exit either way)."""
+        self._stop_background_thread.set()
 
     def validate_config(self) -> bool:
         if not self.favorite_teams:
@@ -519,30 +567,39 @@ class TidbytBaseballPlugin(BasePlugin):
     # Data fetching
     # ------------------------------------------------------------------
     def update(self):
-        now = time.time()
-        has_data = bool(self.live_games) or self.fallback_game is not None
-        interval = self.live_update_interval if self.live_games else self.update_interval
-        seconds_since_last = now - self.last_fetch_time
+        """Called by the core scheduler, if/whenever it calls it. Just
+        delegates to _maybe_refresh() -- the actual polling now also
+        happens independently via the background thread started in
+        __init__, so data refreshes either way regardless of the core's
+        calling cadence for this method."""
+        self._maybe_refresh()
 
-        if has_data and (seconds_since_last < interval):
+    def _maybe_refresh(self):
+        now = time.time()
+        with self._data_lock:
+            has_data = bool(self.live_games) or self.fallback_game is not None
+            interval = self.live_update_interval if self.live_games else self.update_interval
+            seconds_since_last = now - self.last_fetch_time
+            should_skip = has_data and (seconds_since_last < interval)
+
+        if should_skip:
             self.logger.debug(
-                f"update() called but skipping fetch -- only {seconds_since_last:.1f}s since last "
-                f"fetch (interval is {interval}s). If you never see the 'Fetched scoreboard' INFO "
-                f"line below appear again after the first one, update() itself isn't being called "
-                f"often enough by the core scheduler -- possibly only when this plugin's rotation "
-                f"slot comes up, not continuously in the background."
+                f"Skipping fetch -- only {seconds_since_last:.1f}s since last fetch "
+                f"(interval is {interval}s)."
             )
             return
 
-        self.last_fetch_time = now
+        with self._data_lock:
+            self.last_fetch_time = now
 
         if self.test_mode:
             game = self._fake_game()
             self._resolve_logos(game)
-            self.live_games = [game]
-            self.fallback_game = None
-            if self.current_index >= len(self.live_games):
-                self.current_index = 0
+            with self._data_lock:
+                self.live_games = [game]
+                self.fallback_game = None
+                if self.current_index >= len(self.live_games):
+                    self.current_index = 0
             return
 
         try:
@@ -557,15 +614,10 @@ class TidbytBaseballPlugin(BasePlugin):
         # single game had an unusual shape ESPN sometimes sends
         # (pitching change, extra innings, a null field mid-play, etc.)
         # that our parsing code didn't handle, the exception would
-        # propagate straight out of update() uncaught. If the core
-        # scheduler's plugin-calling loop doesn't itself guard against
-        # a plugin's update() throwing, that could silently stop this
-        # plugin from ever updating again -- which matches "the score
-        # itself is also staying frozen" exactly: one bad parse kills
-        # every future refresh, not just that one field. Wrapping this
-        # means a single bad game/response degrades gracefully (keeps
-        # last-known-good data, tries again next interval) instead of
-        # permanently freezing everything.
+        # propagate straight out uncaught. Wrapping this means a single
+        # bad game/response degrades gracefully (keeps last-known-good
+        # data, tries again next interval) instead of permanently
+        # freezing everything.
         try:
             live_games, fallback_game = self._process_scoreboard(data)
 
@@ -585,10 +637,11 @@ class TidbytBaseballPlugin(BasePlugin):
             else:
                 self.logger.info("Fetched scoreboard OK: no live games right now.")
 
-            self.live_games = live_games
-            self.fallback_game = fallback_game
-            if self.current_index >= len(self.live_games):
-                self.current_index = 0
+            with self._data_lock:
+                self.live_games = live_games
+                self.fallback_game = fallback_game
+                if self.current_index >= len(self.live_games):
+                    self.current_index = 0
         except Exception as e:
             self.logger.error(
                 f"Fetched scoreboard successfully but failed to parse/process it: {e}. "
@@ -752,17 +805,22 @@ class TidbytBaseballPlugin(BasePlugin):
     # Rotation
     # ------------------------------------------------------------------
     def _maybe_rotate(self):
-        if len(self.live_games) <= 1:
-            return
-        now = time.time()
-        if now - self.last_switch_time >= self.game_rotation_seconds:
-            self.current_index = (self.current_index + 1) % len(self.live_games)
-            self.last_switch_time = now
+        with self._data_lock:
+            if len(self.live_games) <= 1:
+                return
+            now = time.time()
+            if now - self.last_switch_time >= self.game_rotation_seconds:
+                self.current_index = (self.current_index + 1) % len(self.live_games)
+                self.last_switch_time = now
 
     def _current_game(self) -> Optional[Dict[str, Any]]:
-        if self.live_games:
-            return self.live_games[self.current_index]
-        return self.fallback_game
+        with self._data_lock:
+            if self.live_games:
+                # index is guarded above/in _maybe_refresh, but clamp
+                # defensively in case live_games shrank between calls
+                idx = min(self.current_index, len(self.live_games) - 1)
+                return self.live_games[idx]
+            return self.fallback_game
 
     # ------------------------------------------------------------------
     # Logos
