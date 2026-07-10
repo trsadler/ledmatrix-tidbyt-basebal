@@ -59,6 +59,7 @@ except ImportError:
 
 
 ESPN_SCOREBOARD_URL = "https://site.api.espn.com/apis/site/v2/sports/baseball/mlb/scoreboard"
+ESPN_SUMMARY_URL = "https://site.api.espn.com/apis/site/v2/sports/baseball/mlb/summary"
 
 DEFAULT_AWAY_COLOR = (0, 142, 226)
 DEFAULT_HOME_COLOR = (200, 16, 46)
@@ -626,6 +627,18 @@ class TidbytBaseballPlugin(BasePlugin):
             if fallback_game:
                 self._resolve_logos(fallback_game)
 
+            # Real pitch count isn't in the lightweight scoreboard
+            # response (confirmed from actual captured data) -- fetch
+            # it from ESPN's more detailed per-game summary endpoint
+            # instead. Wrapped in its own try/except per game so one
+            # game's summary failing (or ESPN changing that endpoint's
+            # shape) can't take down the main scoreboard update.
+            for g in live_games:
+                try:
+                    self._enrich_pitch_count(g)
+                except Exception as e:
+                    self.logger.warning(f"Could not fetch pitch count for {g['away_abbr']}@{g['home_abbr']}: {e}")
+
             if live_games:
                 g0 = live_games[0]
                 self.logger.info(
@@ -651,6 +664,124 @@ class TidbytBaseballPlugin(BasePlugin):
                 f"a parsing bug -- please share this traceback.",
                 exc_info=True,
             )
+
+    def _enrich_pitch_count(self, game: Dict[str, Any]):
+        """Fetches ESPN's detailed per-game summary endpoint and tries
+        to find the current pitcher's live pitch count in it. The
+        lightweight scoreboard endpoint doesn't have this (confirmed
+        from real captured data), so this is a second API call per live
+        game per poll cycle.
+
+        ESPN's summary endpoint isn't officially documented either, so
+        this tries a few plausible paths first, then falls back to a
+        generic recursive scan for any key that looks like a pitch
+        count. If NONE of this finds it, logs the raw structure at
+        DEBUG level (only fires once you actually enable debug logging)
+        so we have real data to fix this precisely rather than guessing
+        again -- same approach that worked for the batter name."""
+        event_id = game.get("event_id")
+        if not event_id:
+            return
+
+        resp = self.session.get(ESPN_SUMMARY_URL, params={"event": event_id}, timeout=10)
+        resp.raise_for_status()
+        data = resp.json()
+
+        pitcher_id = None
+        try:
+            # Re-derive the pitcher's ID the same way the scoreboard did,
+            # so we can match them up in the summary's boxscore section.
+            for comp in data.get("header", {}).get("competitions", []):
+                situation = comp.get("situation", {})
+                pid = situation.get("pitcher", {}).get("playerId") or situation.get("pitcher", {}).get("athlete", {}).get("id")
+                if pid:
+                    pitcher_id = str(pid)
+                    break
+        except Exception:
+            pass
+
+        count = self._find_pitch_count(data, pitcher_id)
+        if count is not None:
+            game["pitch_count"] = count
+        else:
+            self.logger.debug(
+                f"Could not find a pitch count in the summary response for "
+                f"{game['away_abbr']}@{game['home_abbr']} (pitcher_id={pitcher_id}). "
+                f"Top-level summary keys: {list(data.keys())}"
+            )
+
+    def _find_pitch_count(self, data: Any, pitcher_id: Optional[str]) -> Optional[int]:
+        """Tries a couple of specific plausible paths first (boxscore
+        player stats keyed by name like "pitchesThrown" or "P"), then
+        falls back to a generic recursive scan of the whole response
+        for any dict that has both a player/athlete id matching
+        pitcher_id AND a key that looks like a pitch count. Best-effort:
+        returns None rather than guessing wrong if nothing matches."""
+        # Specific attempt: ESPN boxscores commonly expose player stats
+        # as parallel "labels"/"names" and "stats" (or "displayValue")
+        # arrays under boxscore.players[].statistics[].
+        try:
+            for team_block in data.get("boxscore", {}).get("players", []):
+                for stat_block in team_block.get("statistics", []):
+                    labels = stat_block.get("labels") or stat_block.get("names") or []
+                    pitch_idx = None
+                    for i, label in enumerate(labels):
+                        if str(label).strip().upper() in ("P", "PC", "PITCHES", "PITCHESTHROWN"):
+                            pitch_idx = i
+                            break
+                    if pitch_idx is None:
+                        continue
+                    for athlete_entry in stat_block.get("athletes", []):
+                        athlete = athlete_entry.get("athlete", {})
+                        if pitcher_id and str(athlete.get("id")) != pitcher_id:
+                            continue
+                        stats = athlete_entry.get("stats", [])
+                        if pitch_idx < len(stats):
+                            try:
+                                return int(str(stats[pitch_idx]).split("-")[0])
+                            except (ValueError, TypeError):
+                                continue
+        except Exception:
+            pass
+
+        # Generic fallback: recursively scan for any dict that has a
+        # pitch-count-looking key AND whose subtree also contains the
+        # pitcher's id somewhere (sibling or nested) -- not just a dict
+        # where both happen to be literally the same object, since real
+        # API shapes usually put stat values as a sibling of the
+        # athlete reference, not inside it.
+        pitch_key_names = {"pitchcount", "pitches", "pitchesthrown", "numberofpitches"}
+
+        def contains_id(node):
+            if isinstance(node, dict):
+                if pitcher_id and str(node.get("id", "")) == pitcher_id:
+                    return True
+                return any(contains_id(v) for v in node.values())
+            if isinstance(node, list):
+                return any(contains_id(item) for item in node)
+            return False
+
+        def scan(node):
+            if isinstance(node, dict):
+                for k, v in node.items():
+                    if k.lower() in pitch_key_names and isinstance(v, (int, str)):
+                        if pitcher_id is None or contains_id(node):
+                            try:
+                                return int(v)
+                            except (ValueError, TypeError):
+                                pass
+                for v in node.values():
+                    result = scan(v)
+                    if result is not None:
+                        return result
+            elif isinstance(node, list):
+                for item in node:
+                    result = scan(item)
+                    if result is not None:
+                        return result
+            return None
+
+        return scan(data)
 
     def _process_scoreboard(self, data: Dict[str, Any]):
         events = data.get("events", [])
@@ -812,6 +943,7 @@ class TidbytBaseballPlugin(BasePlugin):
             "pitcher_name": pitcher_full,
             "pitcher_short_name": pitcher_short,
             "pitch_count": pitch_count,
+            "event_id": event.get("id"),
             "on_first": bool(situation.get("onFirst")),
             "on_second": bool(situation.get("onSecond")),
             "on_third": bool(situation.get("onThird")),
@@ -975,7 +1107,18 @@ class TidbytBaseballPlugin(BasePlugin):
 
             # --- Top row: pitch count + pitcher name, in the space
             #     freed up by moving inning/outs down next to the diamond ---
-            pitch_row_h = self._draw_pitch_info(
+            # IMPORTANT: reserve a FIXED height here regardless of what
+            # _draw_pitch_info actually returns. Using the real returned
+            # height would make diamond_y (and therefore the diamond's
+            # whole size) depend on whether THIS PARTICULAR game has
+            # pitcher data -- which is exactly why the bases looked a
+            # different size between games as the display cycled: some
+            # games had a pitcher name (row ~6px tall) and others didn't
+            # (row 0px tall), so the diamond got more or less vertical
+            # room each time. A fixed reservation keeps geometry
+            # identical across every game regardless of its data.
+            pitch_row_reserved_h = 6
+            self._draw_pitch_info(
                 image, draw, right_x0 + 1, top_margin, right_w - 2,
                 game.get("pitch_count"), game.get("pitcher_name"), game.get("pitcher_short_name"),
             )
@@ -986,7 +1129,7 @@ class TidbytBaseballPlugin(BasePlugin):
             # actual glyph width, not guessing), THEN size the diamond to
             # fit exactly what's left -- this is what guarantees no overlap,
             # rather than assuming a fixed diamond width and hoping it fits.
-            diamond_y = top_margin + pitch_row_h + 1
+            diamond_y = top_margin + pitch_row_reserved_h + 1
             diamond_available_h = (lower_y - 2) - diamond_y
 
             inning_tri_size = 6
@@ -994,8 +1137,8 @@ class TidbytBaseballPlugin(BasePlugin):
             inning_number_w = sample_bbox[2] - sample_bbox[0]
             inning_reserved_w = inning_tri_size + 3 + inning_number_w + 2
 
-            outs_diameter = 4
-            outs_reserved_w = outs_diameter + 2 + 3
+            outs_size = 3
+            outs_reserved_w = outs_size + 2 + 3
 
             available_diamond_w = right_w - inning_reserved_w - outs_reserved_w
             diamond_w = max(min(int(right_w * 0.5), available_diamond_w), 16)
@@ -1007,8 +1150,8 @@ class TidbytBaseballPlugin(BasePlugin):
             inning_y = geo["center_y"] - inning_tri_size // 2
             self._draw_inning(image, right_x0 + 1, inning_y, game)
 
-            outs_cx = right_x0 + right_w - 3 - outs_diameter // 2
-            self._draw_outs(draw, outs_cx, geo["center_y"], game, diameter=outs_diameter, gap=1)
+            outs_cx = right_x0 + right_w - 3 - outs_size // 2
+            self._draw_outs(draw, outs_cx, geo["center_y"], game, size=outs_size, gap=1)
 
             # --- Bottom row: count + batter, unchanged ---
             count_text = f"{game['balls']}-{game['strikes']}"
@@ -1302,16 +1445,26 @@ class TidbytBaseballPlugin(BasePlugin):
 
         self._render_text(image, (x, y), text_to_draw, font, (200, 200, 200))
 
-    def _draw_outs(self, draw, cx, center_y, game, diameter=4, gap=2):
+    def _draw_outs(self, draw, cx, center_y, game, size=3, gap=1):
         """Vertically stacked circles (top to bottom = out 1, 2, 3),
         centered on `center_y` -- filled when recorded, 1px outline
-        when not. `cx` is the horizontal center to align all three on."""
-        radius = diameter // 2
-        total_h = diameter * 3 + gap * 2
+        when not. `cx` is the horizontal center to align all three on.
+
+        `size` is the TRUE pixel width/height of each circle. NOTE:
+        PIL's draw.ellipse([cx-r, cy-r, cx+r, cy+r]) actually renders
+        (2*r + 1) pixels wide, not 2*r -- confirmed by direct pixel
+        measurement (a "radius=2" box measured 5px wide, not 4). That
+        off-by-one was why the circles looked like they were touching
+        with zero gap despite the code nominally asking for a 1px gap.
+        This version computes the box from the real desired `size`
+        directly instead of doubling a radius, so the gap is accurate."""
+        half = (size - 1) / 2
+        spacing = size + gap
+        total_h = size * 3 + gap * 2
         top = center_y - total_h // 2
         for i in range(3):
-            cy = top + radius + i * (diameter + gap)
-            box = [cx - radius, cy - radius, cx + radius, cy + radius]
+            cy = top + size // 2 + i * spacing
+            box = [cx - half, cy - half, cx + half, cy + half]
             if i < game["outs"]:
                 draw.ellipse(box, fill=self.out_fill_color)
             else:

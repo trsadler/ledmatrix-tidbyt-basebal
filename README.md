@@ -209,7 +209,79 @@ rather than failing silently into the generic fallback.
   layout numbers working out that way -- not a deliberate bump, just
   where the math landed.
 
-## New layout: pitcher/pitch count, repositioned inning/outs, swapped colors
+## Real pitch count now fetched (extra API call per live game)
+
+Since ESPN's lightweight scoreboard endpoint doesn't include pitch
+count, this now makes a second request per live game per poll cycle to
+ESPN's more detailed summary endpoint:
+```
+https://site.api.espn.com/apis/site/v2/sports/baseball/mlb/summary?event=<id>
+```
+That endpoint isn't officially documented either, so `_find_pitch_count()`
+tries a specific plausible shape first (boxscore stat tables with
+`labels`/`athletes`/`stats` arrays, a common ESPN pattern), then falls
+back to a generic recursive scan of the whole response for any
+pitch-count-looking key whose subtree also contains the current
+pitcher's ID (to avoid grabbing some other player's count). Tested
+against synthetic versions of both shapes plus a false-positive check
+(confirms it picks the right player when multiple pitch counts are
+present) -- all pass. I could not test this against real ESPN summary
+data from this environment (no network access), so real-world
+accuracy is unverified until you try it live.
+
+**If it still doesn't show up**: run `dump_summary.py` during a live
+game (same idea as the earlier `dump_situation.py`/batter-name
+diagnostic). It fetches the real summary JSON for whatever's live right
+now and prints every field whose name contains "pitch" or "count"
+anywhere in the response, plus the current pitcher's ID for
+cross-referencing. If nothing relevant turns up in that list, ESPN's
+summary endpoint may need a different query parameter or this data
+might live under a completely different structure than what I could
+reasonably guess -- paste me the output and I'll fix the path exactly
+rather than guessing again.
+
+**Performance note**: this doubles the number of ESPN requests while
+games are live (one scoreboard + one summary per live game, each poll
+interval). For a personal display checking every 15s with a handful of
+live games, that's not meaningfully more load, but worth knowing it's
+there if you ever have many favorite teams' games live simultaneously.
+
+
+
+**Diamond size inconsistency** (bases looking a different size for some
+games as the display cycled): confirmed root cause was that the
+diamond's vertical space depended on `_draw_pitch_info`'s *actual*
+returned height, which varies per game -- 0px for a game with no
+pitcher data, ~6px for one with a pitcher name shown. That directly
+changed `diamond_available_h` (and therefore the diamond's computed
+size) game to game. Fixed by reserving a FIXED height for the pitch
+row regardless of its actual content -- verified numerically that the
+diamond's geometry (`half`, `center_y`) is now bit-for-bit identical
+whether or not a game has pitcher data.
+
+**Outs circles touching with no visible gap**: found a real off-by-one
+bug -- a PIL ellipse box built from `radius=2` (nominally a "4px"
+circle) actually renders 5 pixels wide, confirmed by direct pixel
+measurement. My spacing math assumed 4px circles, so the real 1px gap
+I intended became 0px in practice. Rewrote `_draw_outs` to build the
+box from the true desired pixel size directly rather than doubling a
+radius, reduced the size slightly (3px) as requested, and verified by
+scanning actual rendered pixels: exactly 1px of background between
+each circle now, confirmed programmatically, not just visually.
+
+## Pitch count: confirmed not available from this ESPN endpoint
+
+As flagged before touching this, the pitch count isn't showing because
+it's very likely not present in ESPN's lightweight scoreboard endpoint
+at all (confirmed from real captured JSON -- `situation.pitcher` only
+has player info and a text summary, no numeric pitch count field). The
+pitcher's *name* still shows since that data does exist. If you want a
+real live pitch count, it would need an extra API call per live game
+(ESPN's more detailed boxscore/summary endpoint) rather than a
+one-line fix -- let me know if that's worth the added complexity/request
+volume and I'll build it.
+
+
 
 - **Color swap**: the darker shade now sits behind each team's logo
   (better contrast for light/white logo elements), and the full bright
