@@ -258,16 +258,14 @@ twice.
   than guessing: at only 3 pixels wide, tom_thumb's "N" originally used
   three solid middle rows, differing from "M" by exactly one row --
   genuinely ambiguous, not a rendering bug. Iterated through several
-  designs (zigzag diagonal, single dot shifted off-center, a handful of
-  other diagonal/crossbar variations) before landing on the final
-  choice: verticals fully lit with a single dot at dead-center -- which
-  is pixel-identical to this font's "H" glyph. That's an intentional
-  choice, not an oversight: with only 3 columns to work with, no design
-  reads as a clearly "correct" N anyway, and this one was judged to
-  look the best on its own regardless of the H overlap, on the
-  reasoning that surrounding letters/word context make N vs. H
-  distinguishable in practice. Verified pixel-for-pixel through the
-  actual BDF parser at each iteration.
+  designs (zigzag diagonal, dot shifted one row up, a handful of other
+  diagonal/crossbar variations, dot at dead-center matching "H")
+  before landing on the final choice: verticals fully lit with the
+  single dot shifted one row BELOW center -- distinct from both "H"
+  (dot at dead-center) and every other letter/digit (checked all of
+  them at each iteration). Verified pixel-for-pixel through the actual
+  BDF parser at every step, not just that the source file's bytes look
+  right.
 
 ## Favorite-team priority cascade
 
