@@ -1369,12 +1369,12 @@ class TidbytBaseballPlugin(BasePlugin):
         self._render_text(image, (x, y), count_text, self.font_count, (255, 200, 0))
 
     def _draw_due_up(self, image, draw, x, y, max_width, team_abbr):
-        """Shows "(TEAM) DUE UP" in the same spot pitch count/pitcher
-        name normally occupies, for when ESPN's data has a gap between
-        at-bats (no current batter or pitcher listed). `team_abbr` is
-        whichever team is currently batting, derived from inning_half
-        by the caller."""
-        text = f"({team_abbr}) DUE UP"
+        """Shows "TEAM DUE UP" in red, in the same spot pitch count/
+        pitcher name normally occupies, for when ESPN's data has a gap
+        between at-bats (no current batter or pitcher listed).
+        `team_abbr` is whichever team is currently batting, derived
+        from inning_half by the caller."""
+        text = f"{team_abbr} DUE UP"
         font = self._fit_font_for_width(draw, text, max_width, start_size=7, min_size=4)
         bbox = self._measure(font, text)
         text_to_draw = text
@@ -1390,7 +1390,7 @@ class TidbytBaseballPlugin(BasePlugin):
                 truncated = truncated[:-1]
             if text_to_draw is None:
                 return
-        self._render_text(image, (x, y), text_to_draw, font, (180, 180, 220))
+        self._render_text(image, (x, y), text_to_draw, font, (255, 60, 0))
 
     def _draw_pitch_info(self, image, draw, x, y, max_width, pitch_count, pitcher_name, pitcher_short_name):
         """Draws 'P:<count> <Pitcher Name>' at the top of the black
