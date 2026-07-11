@@ -853,8 +853,28 @@ class TidbytBaseballPlugin(BasePlugin):
             ]
 
             if favorite_live_games:
+                # Live favorite game(s) still get priority (listed
+                # first, so they're what shows first each time rotation
+                # cycles back around), but past/upcoming toggles are
+                # still honored here too -- previously this branch
+                # suppressed past/upcoming entirely whenever a favorite
+                # was live, even for the SAME favorite team. Scoped
+                # strictly to favorite teams regardless of
+                # past_upcoming_all_teams -- mixing in some OTHER team's
+                # past/upcoming game here would defeat the point of
+                # favorite-team prioritization.
                 rotation_games = list(favorite_live_games)
-                cascade_state = "favorite team(s) live -- showing only that"
+                if self.show_past_games:
+                    rotation_games += [
+                        g for g in past_games
+                        if g["away_abbr"] in self.favorite_teams or g["home_abbr"] in self.favorite_teams
+                    ]
+                if self.show_upcoming_games:
+                    rotation_games += [
+                        g for g in upcoming_games
+                        if g["away_abbr"] in self.favorite_teams or g["home_abbr"] in self.favorite_teams
+                    ]
+                cascade_state = "favorite team(s) live -- showing that + favorites' past/upcoming"
             elif self.show_favorite_teams_only:
                 rotation_games = []
                 if self.show_past_games:

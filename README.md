@@ -216,6 +216,24 @@ rather than failing silently into the generic fallback.
   layout numbers working out that way -- not a deliberate bump, just
   where the math landed.
 
+## New: favorite team's past/upcoming games no longer suppressed while a favorite is live
+
+Previously, whenever any favorite team had a live game, that branch of
+the cascade showed ONLY the live game(s) -- completely suppressing
+past/upcoming games even for the SAME favorite team(s), regardless of
+`show_past_games`/`show_upcoming_games`. Now the live favorite game(s)
+still get priority (listed first in rotation), but the favorite's own
+past/upcoming games are included too if those toggles are on.
+
+Scoped strictly to favorite teams regardless of `past_upcoming_all_teams`
+-- mixing in some unrelated team's past/upcoming game here would defeat
+the whole point of favorite-team prioritization. Verified with three
+scenarios: a favorite live + a different favorite's final game + a
+different favorite's upcoming game all correctly appear together, while
+non-favorite live/final games stay excluded in the same test; and
+separately, confirmed a non-favorite game stays excluded even with
+`past_upcoming_all_teams: true` enabled, while a favorite is live.
+
 ## Resolved: R/H now absorb leftover space instead of leaving it unused
 
 Final piece of a long debugging chain: viewed the raw diagnostic image
