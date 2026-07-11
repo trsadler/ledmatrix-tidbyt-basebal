@@ -113,14 +113,16 @@ NON_SIGNIFICANT_PLAY_TYPES = {
     "automatic-ball", "automatic-strike", "warmup",
 }
 
-# Best-effort guess at ESPN's home-run type code -- I have NOT confirmed
-# any of these against real data (unlike NON_SIGNIFICANT_PLAY_TYPES,
-# where "ball" and "start-batterpitcher" are both confirmed real
-# samples). If the special home-run animation never triggers on an
-# actual home run, check the plugin logs for the line "Last-play flash
-# QUEUED for ... (type=...)" during a real home run and add whatever
-# the actual type string is to this set.
+# Best-effort guess at ESPN's home-run type code -- confirmed WRONG in
+# practice (real home runs were observed not triggering the animation).
+# Kept as one signal, but no longer the only one -- see
+# _is_home_run_play, which also checks the play's actual narrative text
+# for "home run"/"homers", a far more reliable signal since that text
+# is human-readable and ESPN's phrasing for a home run call
+# ("Judge homers to right field") is predictable regardless of
+# whatever internal type code they use.
 HOME_RUN_PLAY_TYPES = {"home-run", "homerun", "home_run", "hr", "home run"}
+HOME_RUN_TEXT_KEYWORDS = ("home run", "homers", "homered")
 
 # Preference order for auto-discovering a bundled font from the main
 # LEDMatrix install, used only when font_choice is "system" or the
@@ -1103,6 +1105,12 @@ class TidbytBaseballPlugin(BasePlugin):
         count = self._find_pitch_count(data, pitcher_id)
         if count is not None:
             game["pitch_count"] = count
+            self.logger.info(
+                f"Pitch count for {game['away_abbr']}@{game['home_abbr']} "
+                f"(pitcher_id={pitcher_id}): found {count}. If this doesn't match "
+                f"what you see on a real broadcast/MLB app, please report it -- "
+                f"the matching logic that finds this is a best-effort guess, not confirmed."
+            )
         else:
             self.logger.debug(
                 f"Could not find a pitch count in the summary response for "
@@ -1112,11 +1120,18 @@ class TidbytBaseballPlugin(BasePlugin):
 
     def _find_pitch_count(self, data: Any, pitcher_id: Optional[str]) -> Optional[int]:
         """Tries a couple of specific plausible paths first (boxscore
-        player stats keyed by name like "pitchesThrown" or "P"), then
+        player stats keyed by name like "pitchesThrown" or "PC"), then
         falls back to a generic recursive scan of the whole response
         for any dict that has both a player/athlete id matching
         pitcher_id AND a key that looks like a pitch count. Best-effort:
-        returns None rather than guessing wrong if nothing matches."""
+        returns None rather than guessing wrong if nothing matches.
+
+        NOTE: deliberately does NOT match a bare single-letter "P" label
+        -- that was in an earlier version and is confirmed too
+        ambiguous in practice (box scores commonly use "P" for
+        "Position", not "Pitches", causing wrong values to be picked
+        up for many real games). "PC", "PITCHES", "PITCHESTHROWN" are
+        much less likely to collide with something unrelated."""
         # Specific attempt: ESPN boxscores commonly expose player stats
         # as parallel "labels"/"names" and "stats" (or "displayValue")
         # arrays under boxscore.players[].statistics[].
@@ -1126,7 +1141,7 @@ class TidbytBaseballPlugin(BasePlugin):
                     labels = stat_block.get("labels") or stat_block.get("names") or []
                     pitch_idx = None
                     for i, label in enumerate(labels):
-                        if str(label).strip().upper() in ("P", "PC", "PITCHES", "PITCHESTHROWN"):
+                        if str(label).strip().upper() in ("PC", "PITCHES", "PITCHESTHROWN"):
                             pitch_idx = i
                             break
                     if pitch_idx is None:
@@ -1145,20 +1160,26 @@ class TidbytBaseballPlugin(BasePlugin):
             pass
 
         # Generic fallback: recursively scan for any dict that has a
-        # pitch-count-looking key AND whose subtree also contains the
-        # pitcher's id somewhere (sibling or nested) -- not just a dict
-        # where both happen to be literally the same object, since real
-        # API shapes usually put stat values as a sibling of the
-        # athlete reference, not inside it.
+        # pitch-count-looking key AND whose NEARBY subtree (depth-limited,
+        # not the entire response) also contains the pitcher's id.
+        # Unbounded recursion here was a real bug: a large summary
+        # response has rosters, standings, play-by-play, etc, and the
+        # pitcher's id can coincidentally appear in unrelated sections
+        # far from the actual current-game stat being looked for --
+        # matching against a distant, unrelated field is exactly the
+        # kind of thing that would produce a wrong-but-plausible-looking
+        # number instead of failing loudly.
         pitch_key_names = {"pitchcount", "pitches", "pitchesthrown", "numberofpitches"}
 
-        def contains_id(node):
+        def contains_id(node, max_depth=3):
+            if max_depth < 0:
+                return False
             if isinstance(node, dict):
                 if pitcher_id and str(node.get("id", "")) == pitcher_id:
                     return True
-                return any(contains_id(v) for v in node.values())
+                return any(contains_id(v, max_depth - 1) for v in node.values())
             if isinstance(node, list):
-                return any(contains_id(item) for item in node)
+                return any(contains_id(item, max_depth - 1) for item in node)
             return False
 
         def scan(node):
@@ -1735,8 +1756,9 @@ class TidbytBaseballPlugin(BasePlugin):
             show_flash = active_flash is not None and event_id == active_flash["event_id"]
 
             if show_flash:
-                play_type = (game.get("last_play_type") or "").lower()
-                if play_type in HOME_RUN_PLAY_TYPES:
+                play_type = (game.get("last_play_type") or "")
+                play_text_for_detection = game.get("last_play_text") or ""
+                if self._is_home_run_play(play_type, play_text_for_detection):
                     elapsed = time.time() - active_flash["started_at"]
                     batting_color = game["away_color"] if game["inning_half"] else game["home_color"]
                     self._draw_home_run_animation(
@@ -1897,7 +1919,13 @@ class TidbytBaseballPlugin(BasePlugin):
 
         draw.rectangle([left_w, 0, left_w, height - 1], fill=(166, 166, 166))
 
-        right_x0 = left_w + 2
+        # Starts right after the separator (left_w+1), not left_w+2 --
+        # that extra pixel was never filled by anything (not the
+        # separator, not the green background), leaving a visible black
+        # seam on the left edge of the box score specifically. On the
+        # live/upcoming layouts that same gap is invisible since their
+        # black half has no distinct fill color to seam against.
+        right_x0 = left_w + 1
         # Unlike the live/upcoming layouts, this extends all the way to
         # the true panel edge (no "-1" reserve) -- that reserved pixel
         # was left unfilled/black, which is exactly the "dark border"
@@ -2216,6 +2244,20 @@ class TidbytBaseballPlugin(BasePlugin):
                 current = word
         lines.append(current)
         return lines
+
+    def _is_home_run_play(self, play_type: str, play_text: str) -> bool:
+        """Two independent signals, either one triggers the animation:
+        1. The guessed type code (HOME_RUN_PLAY_TYPES) -- confirmed
+           wrong in practice, kept only as a cheap first check in case
+           it's right for some other sport/context.
+        2. The play's actual narrative text containing "home run" or
+           "homers"/"homered" -- much more reliable, since ESPN's
+           human-readable phrasing for a home run call is predictable
+           regardless of whatever internal type code they actually use."""
+        if (play_type or "").lower() in HOME_RUN_PLAY_TYPES:
+            return True
+        text_lower = (play_text or "").lower()
+        return any(kw in text_lower for kw in HOME_RUN_TEXT_KEYWORDS)
 
     def _draw_home_run_animation(self, image, draw, x0, y0, w, h, play_text: str,
                                   elapsed: float, duration: float, team_color, seed: str):

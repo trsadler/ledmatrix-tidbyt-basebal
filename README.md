@@ -216,6 +216,61 @@ rather than failing silently into the generic fallback.
   layout numbers working out that way -- not a deliberate bump, just
   where the math landed.
 
+## Three fixes: home run detection, box score left gap, pitch count accuracy
+
+**1. Home run animation never triggering** -- root cause confirmed:
+detection relied solely on a guessed ESPN type code
+(`HOME_RUN_PLAY_TYPES`), which I'd explicitly flagged as unconfirmed
+when I built it. Real-world testing showed it's simply wrong -- real
+home runs never matched, always falling back to the plain text
+overlay. Fixed with a second, more reliable signal: `_is_home_run_play`
+now ALSO checks the play's actual narrative text for "home run" /
+"homers" / "homered" -- ESPN's human-readable phrasing for a home run
+call is predictable ("Judge homers to right field") regardless of
+whatever internal type code they use. Tested against 7 scenarios
+including the exact failure mode reported (unrecognized type code,
+real home-run text) -- all pass. Verified through the full `display()`
+pipeline at three different elapsed times, confirming all three
+animation phases (ball arc, strobe, fireworks) actually render distinct
+pixels, not just that the detection function returns the right boolean.
+
+**2. Box score had a 1px black gap on the left edge** -- the separator
+bar is 1px wide at `x=left_w`, but the box score's green fill started
+at `left_w+2`, leaving `x=left_w+1` completely unfilled (stayed
+whatever the original black background was). Invisible on the live/
+upcoming layouts since their black half has no distinct fill color to
+seam against, but very visible here. Fixed by starting the green fill
+at `left_w+1`, immediately adjacent to the separator. Verified with
+direct pixel sampling across the transition -- no black pixel remains
+anywhere in it.
+
+**3. Pitch count inaccurate in most games** -- found two real
+weaknesses in the matching logic and tightened both, though I want to
+be upfront that this reduces rather than eliminates the risk of
+inaccuracy, since I still don't have confirmed real data for ESPN's
+exact structure:
+   - The specific-path matcher accepted a bare single-letter `"P"`
+     label as meaning "Pitches" -- but box scores commonly use `"P"`
+     for **Position**, not pitch count. Removed it, keeping only the
+     much less ambiguous `"PC"`, `"PITCHES"`, `"PITCHESTHROWN"`.
+   - The generic fallback's ID-matching recursed through the **entire**
+     response with no depth limit, meaning the pitcher's ID
+     coincidentally appearing anywhere else in a large response (rosters,
+     standings, play-by-play) could match an unrelated field. Added a
+     depth limit (3 levels) so it only trusts nearby matches.
+   - Tested both fixes against the exact false-positive scenario (a
+     `"P"` = Position column) and a deliberately distant/unrelated match
+     -- both now correctly rejected, while legitimate close matches
+     still work.
+   - Added an INFO-level log line whenever a count IS found, so it's
+     easy to spot-check against a real broadcast without needing debug
+     logging enabled.
+   - **Since games are live right now**, running `dump_summary.py`
+     (shared earlier) during an actual game would give real ground-truth
+     data to fix this with certainty instead of further tightening
+     guesses -- happy to take another pass once there's real data to
+     work from.
+
 ## Fixed: dark unfilled border around the box score
 
 **Root cause wasn't the grid math** -- it was how `right_w` itself was
