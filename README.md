@@ -216,7 +216,40 @@ rather than failing silently into the generic fallback.
   layout numbers working out that way -- not a deliberate bump, just
   where the math landed.
 
-## Fixed: box score characters looked scattered/off-center
+## Fixed for real this time: box score cross-row misalignment + logo bleed
+
+Still looked scattered after the previous ink-based centering fix, so
+dug deeper: measured every digit's actual ink width individually and
+found "1" is genuinely only 2px wide in this font (`BBX 2 5`) while
+every other digit is 3px (`BBX 3 5`) -- confirmed straight from the
+font file, not a rendering bug. Each digit was correctly centered
+*within its own cell*, but a "1" in one row and a "0" in the same
+column a row below wouldn't align with each other, since one is
+narrower than the other -- exactly what reads as "off center in many
+spots" when scanning down a column rather than looking at any single
+digit in isolation.
+
+**Fixed by widening "1" to 3px** (added a small base/foot, a common
+pixel-font convention), matching every other digit's width. Checked
+for collisions against every other letter/digit first -- none.
+Verified concretely: measured the horizontal center of every
+inning column in BOTH the away and home rows for the exact scenario
+from the screenshot -- all nine columns now align perfectly between
+rows, where "1"-containing columns previously did not.
+
+**Also fixed the logo bleed**: confirmed the actual cause -- logo size
+was computed from the standard 50/50 column split
+(`_resolve_logos`), but the box score's `_render_final_game` uses a
+narrower 40/60 split for the team columns specifically. Logos were
+being sized for the wider column and then squeezed into the narrower
+one, overflowing into the box score. Fixed by making logo sizing
+game-type-aware (checks `game["game_type"]` and computes the correct
+column width for whichever layout is actually being used). Verified
+the computed sizes now genuinely differ (36px for live's wider column
+vs. 29px for final's narrower one) and confirmed no logo-colored
+pixels appear past the team-column boundary in a fresh render.
+
+
 
 **Root cause confirmed by directly comparing measured vs. actually
 rendered ink pixels**: the centering math used the font's measured

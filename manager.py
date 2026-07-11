@@ -1763,7 +1763,15 @@ class TidbytBaseballPlugin(BasePlugin):
             return
         if size is None:
             width, height = self._get_dimensions()
-            col_w = (width // 2) // 2
+            # IMPORTANT: final games use a narrower 40% left-half split
+            # (_render_final_game), not the standard 50/50 the live/
+            # upcoming layouts use -- sizing logos off the wrong split
+            # is exactly what caused them to bleed into the box score:
+            # a logo sized for the wider 50%-split column doesn't fit
+            # the narrower one used for the box score layout.
+            left_fraction = 0.4 if game.get("game_type") == "final" else 0.5
+            left_w = int(width * left_fraction)
+            col_w = left_w // 2
             # Slightly larger than the column itself -- allowed to bleed
             # a small amount off the panel edges (and, since two columns
             # sit side by side, potentially a couple px into the
