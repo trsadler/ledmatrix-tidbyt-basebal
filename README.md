@@ -216,6 +216,48 @@ rather than failing silently into the generic fallback.
   layout numbers working out that way -- not a deliberate bump, just
   where the math landed.
 
+## New: past_upcoming_all_teams only applies when NOTHING is live anywhere
+
+Clarified a real gap: previously, whenever `past_upcoming_all_teams`
+was on, it applied unconditionally -- including when some OTHER
+(non-favorite) team was live. That meant an unrelated team's past/
+upcoming game could show up right alongside live games happening
+right now, which is a cluttered experience regardless of what that
+setting is for.
+
+Split the cascade's non-strict branch into two: (1) some other team is
+live but not a favorite -- past/upcoming now restricted to favorites
+ONLY here, regardless of `past_upcoming_all_teams`; (2) literally
+nothing is live anywhere -- NOW `past_upcoming_all_teams` applies as
+designed (all teams if on, favorites only if off).
+
+Verified with four scenarios: other team live + setting on -> only
+favorites' past/upcoming show alongside the live game, unrelated
+teams' final/upcoming excluded; nothing live anywhere + setting on ->
+ALL teams' final games correctly show; favorite live + other teams
+also live + setting on -> only the favorite's live game shows, nothing
+else at all; and the original favorite-live + favorites' own past/
+upcoming case (from the previous round) still works unchanged.
+
+## Fixed: row 2 (away row) numbers sat 1px too high
+
+Root cause confirmed numerically: 32 doesn't divide evenly by 3, so
+the three box-score rows come out to heights 11/10/11 -- header and
+home get 11px (leftover space after fitting the 5px-tall glyph is an
+even 6px, splitting perfectly 3px/3px), but the away row gets only
+10px (leftover is an odd 5px, which floor-division centering can only
+split asymmetrically -- 2px top, 3px bottom), landing every digit 1px
+too high specifically in that row.
+
+Fixed by rounding UP instead of flooring when computing the vertical
+offset -- confirmed this exact change leaves the already-correct
+header/home rows completely unaffected (their leftover space is even,
+so rounding up or down gives the identical result), while shifting the
+away row's text down exactly 1px. Verified via direct pixel
+measurement: away row now shows 3px top / 2px bottom padding (down
+from 2px/3px), matching header and home's 3px/3px as closely as an
+odd-height row possibly can.
+
 ## New: favorite team's past/upcoming games no longer suppressed while a favorite is live
 
 Previously, whenever any favorite team had a live game, that branch of

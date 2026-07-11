@@ -847,10 +847,10 @@ class TidbytBaseballPlugin(BasePlugin):
             #    of that is empty too, fall back to the single
             #    best-guess favorite game (preserves pre-this-feature
             #    behavior for anyone with everything else off).
-            favorite_live_games = [
-                g for g in live_games
-                if g["away_abbr"] in self.favorite_teams or g["home_abbr"] in self.favorite_teams
-            ]
+            def _is_favorite_game(g):
+                return g["away_abbr"] in self.favorite_teams or g["home_abbr"] in self.favorite_teams
+
+            favorite_live_games = [g for g in live_games if _is_favorite_game(g)]
 
             if favorite_live_games:
                 # Live favorite game(s) still get priority (listed
@@ -865,15 +865,9 @@ class TidbytBaseballPlugin(BasePlugin):
                 # favorite-team prioritization.
                 rotation_games = list(favorite_live_games)
                 if self.show_past_games:
-                    rotation_games += [
-                        g for g in past_games
-                        if g["away_abbr"] in self.favorite_teams or g["home_abbr"] in self.favorite_teams
-                    ]
+                    rotation_games += [g for g in past_games if _is_favorite_game(g)]
                 if self.show_upcoming_games:
-                    rotation_games += [
-                        g for g in upcoming_games
-                        if g["away_abbr"] in self.favorite_teams or g["home_abbr"] in self.favorite_teams
-                    ]
+                    rotation_games += [g for g in upcoming_games if _is_favorite_game(g)]
                 cascade_state = "favorite team(s) live -- showing that + favorites' past/upcoming"
             elif self.show_favorite_teams_only:
                 rotation_games = []
@@ -882,13 +876,31 @@ class TidbytBaseballPlugin(BasePlugin):
                 if self.show_upcoming_games:
                     rotation_games += upcoming_games
                 cascade_state = "strict mode, no favorite live -- favorites' past/upcoming only"
-            else:
+            elif live_games:
+                # NEW: some OTHER team is live (not a favorite). Explicit
+                # request: past/upcoming games should be restricted to
+                # favorites ONLY here, regardless of past_upcoming_all_teams
+                # -- that setting only matters when NOTHING is live
+                # anywhere (see the final branch below). Otherwise a
+                # non-favorite team's past/upcoming game shows up right
+                # alongside live games happening right now, which is
+                # exactly the cluttered experience being avoided.
                 rotation_games = list(live_games)
+                if self.show_past_games:
+                    rotation_games += [g for g in past_games if _is_favorite_game(g)]
+                if self.show_upcoming_games:
+                    rotation_games += [g for g in upcoming_games if _is_favorite_game(g)]
+                cascade_state = "other team(s) live, no favorite live -- showing those + favorites' past/upcoming only"
+            else:
+                # Nothing live ANYWHERE -- past_upcoming_all_teams now
+                # applies as designed (past_games/upcoming_games were
+                # already scoped at fetch time per that setting).
+                rotation_games = []
                 if self.show_past_games:
                     rotation_games += past_games
                 if self.show_upcoming_games:
                     rotation_games += upcoming_games
-                cascade_state = "no favorite live -- showing all live games + past/upcoming"
+                cascade_state = "nothing live anywhere -- past/upcoming per past_upcoming_all_teams setting"
 
             if not rotation_games and fallback_game:
                 rotation_games = [fallback_game]
@@ -2212,7 +2224,18 @@ class TidbytBaseballPlugin(BasePlugin):
                 ink_w = ink_right - ink_left + 1
                 target_ink_x0 = x0 + max((w - ink_w) // 2, 0)
                 tx = target_ink_x0 - ink_left + 3  # +3 undoes _ink_extent's internal scratch-render offset
-                ty = y0 + max((h - th) // 2, 0) - bbox[1]
+                # Vertical centering: rounds UP (biases the text down)
+                # rather than floor-rounding, specifically to fix row 2
+                # (away row) -- confirmed its height comes out to 10px
+                # vs 11px for header/home (32 doesn't divide evenly by
+                # 3), leaving an ODD 5px of leftover space after fitting
+                # the 5px-tall glyph, which floor-division split
+                # asymmetrically (2px top, 3px bottom), placing every
+                # digit 1px too high. Header/home have EVEN leftover
+                # (6px) and already centered perfectly (3px/3px) --
+                # rounding up instead of down doesn't change their
+                # result at all, only row 2's.
+                ty = y0 + max((h - th + 1) // 2, 0) - bbox[1]
                 self._render_text(image, (tx, ty), text, font, color)
 
         # Header row: inning numbers, then R/H/E labels
