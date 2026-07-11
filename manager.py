@@ -2117,10 +2117,29 @@ class TidbytBaseballPlugin(BasePlugin):
         num_innings = min(num_innings, max_innings_that_fit, 12)
 
         col_widths = [inning_col_w] * num_innings + [wide_col_w, wide_col_w, e_col_w]
-        col_bounds = [right_x0]
+        total_grid_w = sum(col_widths)
+        # IMPORTANT: the grid's exact fixed width (per the 1px-padding
+        # spec) is usually narrower than the full available right_w --
+        # confirmed this was being left-aligned with ALL the leftover
+        # space dumped after the E column, and with no border marking
+        # where the table actually ends, that undivided trailing green
+        # space visually read as if it were part of the E column itself
+        # ("too much padding to the right of E"). Centering the grid
+        # instead splits any leftover space evenly as margin on both
+        # sides, and a right-edge border (added below, alongside the
+        # existing internal dividers) makes the table's true boundary
+        # visually unambiguous regardless of how much margin remains.
+        grid_x0 = right_x0 + max((right_w - total_grid_w) // 2, 0)
+        col_bounds = [grid_x0]
         for cw in col_widths:
             col_bounds.append(col_bounds[-1] + cw)
         row_bounds = [round(i * height / 3) for i in range(4)]
+
+        self.logger.info(
+            f"BOXSCORE DEBUG: width={width} left_w={left_w} right_x0={right_x0} "
+            f"right_w={right_w} total_grid_w={total_grid_w} grid_x0={grid_x0} "
+            f"col_bounds={col_bounds} row_bounds={row_bounds}"
+        )
 
         header_y0, header_y1 = row_bounds[0], row_bounds[1]
         away_y0, away_y1 = row_bounds[1], row_bounds[2]
@@ -2133,13 +2152,17 @@ class TidbytBaseballPlugin(BasePlugin):
         # its own full border -- confirmed by direct pixel sampling that
         # doing it per-cell doubles every INTERNAL divider to 2px thick
         # (each of two adjacent cells draws its own separate 1px border
-        # immediately next to, not on top of, the other's). Only draw
-        # INTERNAL boundaries (skip the outer edge, which is already the
-        # panel/background edge and doesn't need a redundant stroke).
-        for cx in col_bounds[1:-1]:
+        # immediately next to, not on top of, the other's). Draws ALL
+        # boundaries now, including the outer left/right edges -- with
+        # the grid centered (leftover width split as margin on both
+        # sides rather than dumped as one large gap after E), those
+        # edges need their own visible border too, or the table's true
+        # boundary is ambiguous against the surrounding green margin.
+        grid_x1 = col_bounds[-1]
+        for cx in col_bounds:
             draw.line([(cx, header_y0), (cx, home_y1 - 1)], fill=GRID_LINE)
         for cy in row_bounds[1:-1]:
-            draw.line([(right_x0, cy), (right_x0 + right_w - 1, cy)], fill=GRID_LINE)
+            draw.line([(grid_x0, cy), (grid_x1 - 1, cy)], fill=GRID_LINE)
 
         def draw_cell(x0, x1, y0, y1, text, color=TEXT_COLOR):
             if text:

@@ -216,6 +216,39 @@ rather than failing silently into the generic fallback.
   layout numbers working out that way -- not a deliberate bump, just
   where the math landed.
 
+## Fixed: unbordered leftover space made E column look oversized
+
+**Confirmed real, separate from the padding question**: the fixed-
+width grid (68px) is narrower than the available space (~76px), and
+it was left-aligned with ALL the leftover ~8px dumped after the E
+column, with no border marking where the table actually ends. That
+undivided trailing green space visually read as if it were part of
+the E column -- exactly "too much padding to the right of E."
+
+**Fixed** by centering the grid within the available space (leftover
+splits evenly as ~4px margin on both sides instead of one large gap on
+one side) and drawing borders on the outer left/right edges too, not
+just internal dividers -- so the table's true boundary is visually
+unambiguous regardless of how much margin remains around it. Verified
+symmetric margins and confirmed both edges now show a real border
+pixel, with genuinely plain green (clearly outside the table) beyond
+each edge. Re-verified all padding still measures exactly 1px on
+every column after this change.
+
+**The "no left padding" issue is still open.** I have not been able to
+reproduce it despite extensive testing -- multiple direct code
+re-reads, and reproductions using your exact digit sequence, all show
+correct 1px padding on every column. Both `manager.py` and the font
+file are now confirmed current on your end, and you've ruled out
+LED dot-mode as the cause, so the remaining explanation is either
+something in your specific runtime that I can't access from here, or
+a discrepancy between what I assume the code does and what it actually
+computes on your system. Updated `diagnose_boxscore.py` to
+independently scan the rendered image for where grid lines actually
+land (not just trust my own reconstruction of the math) and compare
+that against the expected column boundaries -- if those two don't
+match, that pinpoints the discrepancy directly instead of more guessing.
+
 ## Box score: exact 1px padding per spec, investigated missing data
 
 **Replaced proportional/weighted column widths with exact fixed
