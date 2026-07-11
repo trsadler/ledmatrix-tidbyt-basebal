@@ -2097,24 +2097,34 @@ class TidbytBaseballPlugin(BasePlugin):
         # on each side, per explicit spec -- inning columns and E only
         # ever need to fit a single digit (3px ink, confirmed uniform
         # across all digits after the earlier "1" glyph widening), so
-        # 3 + 1 + 1 = 5px. R/H need to comfortably fit double digits
-        # (7px ink for two digits side by side, measured directly) plus
-        # the same 1px padding each side = 9px -- "slightly wider" per
-        # request, since double-digit runs/hits are realistic but
-        # double-digit errors essentially never happen.
+        # 3 + 1 + 1 = 5px.
         single_digit_ink_w = 3
         double_digit_ink_w = 7
         pad = 1
         inning_col_w = single_digit_ink_w + pad * 2   # 5
-        wide_col_w = double_digit_ink_w + pad * 2     # 9
         e_col_w = single_digit_ink_w + pad * 2         # 5, same as innings
+        min_wide_col_w = double_digit_ink_w + pad * 2  # 9, minimum for R/H
 
-        # Cap displayed innings based on available width so a very long
-        # extra-innings game can't push the grid past the panel edge,
-        # rather than a fixed cap regardless of space.
-        fixed_extra_w = wide_col_w * 2 + e_col_w
-        max_innings_that_fit = max((right_w - fixed_extra_w) // inning_col_w, 1)
+        # Cap displayed innings using the MINIMUM wide-column width as a
+        # conservative assumption -- ensures R/H never shrink below their
+        # functional minimum even in a long extra-innings game, before
+        # we know the final num_innings needed to compute their actual
+        # (possibly larger) width below.
+        fixed_extra_w_min = min_wide_col_w * 2 + e_col_w
+        max_innings_that_fit = max((right_w - fixed_extra_w_min) // inning_col_w, 1)
         num_innings = min(num_innings, max_innings_that_fit, 12)
+
+        # IMPORTANT: confirmed via a direct look at the raw rendered image
+        # (bypassing any web UI rendering entirely) that fixing R/H at
+        # exactly 9px left real, visible unused space after the E column
+        # whenever the fixed columns didn't fully consume the available
+        # width -- correct geometry, but wasted space that looked wrong.
+        # R/H now dynamically absorb ALL leftover width instead of
+        # leaving it unused, per explicit spec allowance that they can
+        # be "slightly wider" -- never shrinking below the minimum
+        # needed to comfortably fit double digits.
+        remaining_for_wide = right_w - (inning_col_w * num_innings) - e_col_w
+        wide_col_w = max(remaining_for_wide // 2, min_wide_col_w)
 
         col_widths = [inning_col_w] * num_innings + [wide_col_w, wide_col_w, e_col_w]
         total_grid_w = sum(col_widths)

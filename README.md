@@ -216,6 +216,41 @@ rather than failing silently into the generic fallback.
   layout numbers working out that way -- not a deliberate bump, just
   where the math landed.
 
+## Resolved: R/H now absorb leftover space instead of leaving it unused
+
+Final piece of a long debugging chain: viewed the raw diagnostic image
+directly (bypassing the web UI preview entirely, via a quick HTTP
+server on the Pi) and confirmed the E column genuinely IS narrow,
+matching spec exactly -- but there was real, visible unused green
+space after it, since the fixed-width grid (68px) didn't fully consume
+the available space (76px). Correct geometry, but wasted space that
+looked wrong regardless.
+
+**Fixed** by making R/H's width dynamic: they now absorb ALL leftover
+space exactly (computed as `(right_w - innings - E) / 2`), rather than
+sitting at a fixed 9px and leaving the remainder as dead space. They
+never shrink below the minimum needed to comfortably fit double digits
+(still 9px as a floor), but grow to fill available space when there's
+room -- 13px in the standard 9-inning case, exactly consuming the full
+right half with zero leftover. This is a natural fit with the original
+spec, which already allowed R/H to be "slightly wider" than the
+innings/E.
+
+Verified: innings and E still measure exactly 1px padding on both
+sides (unaffected by this change), R/H now show more generous padding
+since they're wider (5px each side, up from 1px), the grid extends all
+the way to the true panel edge with nothing left over, and extra-
+innings games still render without overflowing.
+
+**Root-cause summary for this whole thread**: the "no left padding"
+perception was ultimately never a bug in the plugin's rendering math --
+confirmed conclusively via a debug log reporting the exact internal
+state, matched character-for-character against independent sandbox
+computation, and finally against the raw rendered image itself,
+bypassing the web UI's preview rendering entirely. The one real,
+concrete bug in this whole investigation was the leftover unused space
+issue just described, now fixed.
+
 ## Confirmed via direct debug logging: padding math is correct; reverted a regression
 
 Added a debug log line directly inside `_render_final_game` reporting
